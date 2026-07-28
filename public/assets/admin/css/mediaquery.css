@@ -1,0 +1,125 @@
+.custMobileVisible{
+	display: none;
+}
+#customers th{
+	text-transform: capitalize;
+}
+.select-editable select.form-control{
+	width: 100% !important;
+}
+.select-editable input.form-control{
+	width: calc(100% - 20px) !important;
+}
+@media(max-width:1300px){
+	.main_content {
+		padding: 100px 7.5px;
+	}
+}
+@media(max-width:1199px){}
+@media(max-width:1024px){}
+@media(max-width:991px){
+	.main_content {
+		padding: 60px 7.5px;
+	}
+	footer .common h6{
+		font-size: 18px;
+	}
+	.logo img {
+		max-width: 180px;
+	}
+	#frmAppointment .table_bottom{
+		padding-left: 1.25rem;
+		padding-right: 1.25rem;
+	}
+	#frmAppointment .table_bottom #customers button{
+		width: 100%;
+	}
+	.select-editable select{
+		width: 100%;
+	}
+}
+@media(max-width:767px){
+	.main_content {
+		padding: 60px 7.5px;
+	}
+		.navbar-light .navbar-brand {
+		margin: 0 auto;
+	}
+		.search-bar.d-block.d-md-none {
+		display: none !important;
+	}
+	.navbar-expand-md .navbar-collapse{
+		display: flex;
+	}
+	.navbar-nav.ml-auto.d-block.d-md-none {
+		display: none !important;
+	}
+	#sidebarCollapse {
+		display: none !important;
+	}
+	footer .get-in-touch.common {
+		padding-left: 0px;
+	}
+	.details_menu {
+		margin-left: auto;
+		width: 100%;
+		flex-direction: row;
+		/* align-items: center; */
+		justify-content: space-between;
+		margin-bottom: 19px;
+	}
+	.main_content h2{
+		font-size: 28px;
+	}
+	.details_menu li.icons{
+		margin-right: 0px;
+    	padding: 0 7.5px;
+	}
+	.details_menu li.icons::before{
+		vertical-align: middle;
+	}
+	.details_menu li a{
+		display: inline-block;
+		font-size: 12px;
+    	line-height: 23px;
+	}
+	footer .site-map{
+		padding-left: 0;
+	}
+	footer{
+		padding: 40px 0px;
+	}
+	
+	.custMobThead{
+		display: none !important;
+	}
+
+	.table-responsive, .table-responsive thead, .table-responsive tbody, .table-responsive th, .table-responsive td, .table-responsive tr { 
+		display: block; 
+	}		
+	.table-responsive tr { border: 1px solid #ccc; }	
+	.table-responsive tbody td { 
+		border: none;
+		border-bottom: 1px solid #eee; 
+		position: relative;
+		padding-left: 50%; 
+	}
+	.custMobileVisible{
+		display: block;
+		width: 100%;
+		padding-right: 10px;
+		white-space: nowrap;
+		display: block;
+		color: #000;
+    	font-weight: 600;
+		text-transform: capitalize;
+	}
+	.custCountryCode{
+		width: 100px;
+	}
+	.custMobileNum{
+		width: calc(100% - 100px);
+	}
+}
+@media(max-width:575px){}
+@media(max-width:480px){}

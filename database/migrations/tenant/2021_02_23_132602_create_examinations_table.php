@@ -1,0 +1,61 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+
+class CreateExaminationsTable extends Migration {
+
+	/**
+	 * Run the migrations.
+	 *
+	 * @return void
+	 */
+	public function up()
+	{
+		Schema::create('examinations', function(Blueprint $table)
+		{
+			$table->increments('id', true);
+			$table->integer('migration_id')->nullable();
+			$table->integer('fk_specialist_id')->nullable();
+			$table->string('name');
+			$table->text('description', 65535)->nullable();
+			$table->string('url');
+			$table->string('document_name')->nullable();
+			$table->string('document_path')->nullable();
+			$table->smallInteger('document_status')->nullable()->default(0)->comment('0=>Unread,1=>Read,2=>Sign');
+			$table->smallInteger('default_service')->nullable();
+			$table->smallInteger('status');
+			$table->smallInteger('show_as_control')->nullable()->default(0)->comment('1=show on doctoer dashboard,0=not show');
+			$table->string('check_list_pdf_name')->nullable();
+			$table->string('check_list_pdf_path')->nullable();
+			$table->enum('check_list_status', array('0','1','2'))->comment('0=> pending,1=>unread,2=>signed');
+			$table->string('signature')->nullable();
+			$table->smallInteger('trigger_exam_flag')->default(0)->nullable();
+			$table->enum('show_as_reminder', array('0','1'))->default(0)->comment('0=> not set reminder,1=>set remider');
+			$table->enum('on_dashboard', array('0','1'))->default(0)->nullable();
+			$table->enum('show_as_recommended', array('0','1'))->default(0)->nullable();
+			$table->integer('sequence_no')->nullable();
+			$table->integer('sorting_order')->default(0);
+			$table->timestamps();
+			$table->softDeletes();
+
+			$table->index('show_as_control', 'show_as_control'); // added on 11-april-23
+			$table->index('status', 'status'); // added on 11-april-23
+			$table->index('name', 'name'); // added on 11-april-23
+
+
+		});
+	}
+
+
+	/**
+	 * Reverse the migrations.
+	 *
+	 * @return void
+	 */
+	public function down()
+	{
+		Schema::drop('examinations');
+	}
+
+}

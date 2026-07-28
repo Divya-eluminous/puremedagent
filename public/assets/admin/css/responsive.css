@@ -1,0 +1,195 @@
+@media (max-width:1920px){	
+	.card table > thead > tr > th{/*width: 4% !important;*/}
+	.card table > thead > tr > th:first-child, .card table > thead > tr > td:first-child, .card table>tbody>tr>td:first-child{padding:4px 12px !important; /*width:4% !important;*/}	
+	.card table > thead > tr > th:last-child, .card table > tbody > tr > td:last-child{padding:4px 12px !important;  /*width:8% !important;*/}
+	.card table > thead > tr > th:not(:first-child){padding:4px 6px !important; width:inherit;}	
+	
+	.left-sidebar .panel-default>.panel-heading a{padding-left:26px;}
+	.left-sidebar .panel-heading.active::before, .left-sidebar .panel-heading:hover::before{width:8px;}
+	.sidebar-icon{margin-right:16px;}
+	
+}
+
+
+@media (max-width:1600px){
+	
+	.left-sidebar{max-width:220px;}
+	.left-sidebar .panel-default > .panel-heading a{padding-left:12px;}
+	.sidebar-icon{max-width:18px; margin-right:10px; height:22px;}
+	.left-sidebar .panel-default > .panel-heading a h4, .sub-menu li a{font-size:17px;}
+	.sub-menu li a{padding-left:40px; font-size:17px;}
+	.left-sidebar .panel-heading.active::before, .left-sidebar .panel-heading:hover::before{width:4px;}
+	
+	.rigth-sidebar{padding:20px; padding-bottom:10px; margin-left:220px;}	
+	
+	table > tbody > tr > td > div a img{margin-right:8px; width:16px; height:16px;}
+	
+}
+
+
+@media (max-width:1366px){
+	.left-sidebar{max-width:200px;}
+	.left-sidebar .panel-default > .panel-heading a{height:auto; padding:14px 8px;}
+	.sidebar-icon{max-width:16px; margin-right:6px; height:18px;}
+	.left-sidebar .panel-default > .panel-heading a h4, .sub-menu li a{font-size:16px;}
+	.sub-menu li a{padding-left:40px; font-size:16px;}
+	.left-sidebar .panel-heading.active::before, .left-sidebar .panel-heading:hover::before{width:2px;}
+	
+	.rigth-sidebar{margin-left:200px;}
+	.bundle .card table>thead>tr>th, .padding-heading .card table>thead>tr>th{font-size:14px; line-height:20px;}
+	
+	.bundle .card table > tbody > tr > td{vertical-align: middle;}
+	.table>tbody>tr>td, .table>tbody>tr>th, .table>tfoot>tr>td, .table>tfoot>tr>th, .table>thead>tr>td, .table>thead>tr>th{padding:4px 2px 4px 6px;}
+	.bundle .card table > thead > tr > th:not(:first-child){padding-left:8px;}
+	.bundle table input[type="text"], .bundle table .card input[type="text"], .bundle table .card input[type="email"], .bundle table input[type="password"], .bundle table .card input[type="date"], .bundle table textarea.form-control{margin-left:8px;}
+	.bundle table .form-control{padding:6px 6px; width: 80px;}
+	
+	
+	/*.bundle .card table > thead > tr > th.w-120-px{width:90px !important;}
+	.bundle .card table > thead > tr > th:nth-of-type(2), .bundle .card table > thead > tr > td:nth-of-type(2){width:72px !important;}
+	.bundle .card table > thead > tr > th:nth-of-type(3), .bundle .card table > thead > tr > td:nth-of-type(3){width:94px !important;}
+	.bundle .card table > thead > tr > th:nth-of-type(4), .bundle .card table > thead > tr > td:nth-of-type(4){width:90px !important;}
+	.bundle .card table > thead > tr > th:nth-of-type(5), .bundle .card table > thead > tr > td:nth-of-type(5){width:94px !important;}
+	
+	.bundle .card table > thead > tr > th.w-50-px{width: 42px !important;}
+	.card table > thead >tr > th{padding: 0px 4px !important;}*/
+	
+	
+	
+	
+}
+
+@media screen and (max-width: 1279px) {
+    /*.left-sidebar .panel-default>.panel-heading a {
+			height: 50px;
+			padding-left: 20px;
+		}   
+		.sidebar-icon {
+			max-width: 20px;
+			margin-right: 20px;
+			height: 20px;
+		}
+	*/
+    /* =======card========== */
+    .card .title{padding:20px 20px 20px 30px; font-size:18px;}
+    .action-wrapper{right:0px;}
+	
+	.bundle .card table > thead > tr > th, .padding-heading .card table > thead > tr > th{font-size:13px; line-height:18px;}
+	tr.inner-td td{font-size:12px;}
+	
+}
+
+@media screen and (max-width: 1100px) {
+    body {
+        font-size: 14px;
+    }
+
+    .blue-btn.btn-normal {
+        font-size: 14px;
+        padding: 3px 15px;
+    }
+
+    /* ---------- card ----------- */
+    .card .title,
+    .table-total,
+    .card-subtitle,
+    .table>tbody>tr>td.card-subtitle,
+    .card-body {
+        padding: 15px;
+    }
+
+    .card table>thead>tr>th:first-child,
+    .card table>tbody>tr>td:first-child {
+        padding-left: 15px !important;
+    }
+
+    /* ---------- width ----------- */
+    .r-w-65-px {
+        width: 65px;
+    }
+
+    .r-w-100-px {
+        width: 100px;
+    }
+
+    .r-w-180-px {
+        width: 180px;
+    }
+
+    .r-w-100 {
+        width: 100% !important;
+    }
+    .mb-25 {
+        margin-bottom: 15px;
+    }
+    .r-lh-normal {
+        line-height: normal !important;
+    }
+    /* ----------- Bundle --------- */
+    .Safari .sbHolder a.sbSelector::after,
+    .sbHolder a.sbSelector::after {
+        right: 5px !important;
+    }
+
+    .sub-menu li a {
+        padding: 10px 0px 10px 60px;
+    }
+
+    .blue-btn,
+    .blue-btn:focus,
+    .blue-btn:hover,
+    .blue-btn-inverse,
+    .blue-btn-inverse:hover,
+    .blue-btn-inverse:focus {
+        font-size: 14px;
+        padding-right: 7px !important;
+        padding-left: 7px !important;
+    }
+
+    .bundle table>tbody>tr>td>div img {
+        margin-right: 5px;
+        width: 15px;
+        height: 15px;
+    }
+
+    .bundle .card table>thead>tr>th,
+    .padding-heading .card table>thead>tr>th {
+        font-size: 13px;
+        line-height: 15px;
+    }
+
+    tr.inner-td td {
+        font-size: 13px;
+    }
+
+    table .f-18 {
+        font-size: 15px !important;
+    }
+
+    label {
+        font-size: 14px;
+        margin-bottom: 3px;
+    }
+    .pagination>li>a, .pagination>li>span {
+        width: 40px;
+        height: 40px;
+    }
+    .Safari .pagination>li>a, .Safari .pagination>li>span{
+        line-height: 27px !important;
+    }
+    .r-f-col-2 {
+        max-width: 16.666667%;
+    }
+}
+
+
+/*@media screen and (max-height: 900px) {
+    .left-sidebar .panel-default>.panel-heading a {
+        height: 50px;
+    }
+
+    .left-sidebar .panel-default>.panel-heading a h4,
+    .sub-menu li a {
+        font-size: 18px;
+    }
+}*/

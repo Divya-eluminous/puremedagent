@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generator: Adobe Illustrator 17.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	 width="24px" height="24px" viewBox="0 0 24 24" enable-background="new 0 0 24 24" xml:space="preserve">
+<title>Customers</title>
+<desc>Created with Sketch.</desc>
+<g id="Dashboard">
+	<g id="Nav" transform="translate(-43.000000, -173.000000)">
+		<g transform="translate(-6.000000, 0.000000)">
+			<g id="Nav---Active-Links-and-Icons" transform="translate(0.000000, 80.000000)">
+				<g id="Active-Customers" transform="translate(0.000000, 68.000000)">
+					<path id="Customers" fill="#285CAD" d="M71,42.002h-5.924c-0.982-0.763-2.037-1.258-3.1-1.516
+						c1.01-0.896,1.709-2.126,1.936-3.516c-0.001,0.012,0,0.023-0.002,0.035c0.03-0.001,0.059-0.004,0.09-0.004c5,0,7,3,7,3V42.002z
+						 M65,47.002H51v-2c0,0,2-3,7-3s7,3,7,3V47.002z M54,36.002c0-2.209,1.791-4,4-4s4,1.791,4,4s-1.791,4-4,4S54,38.211,54,36.002z
+						 M64,27.002c2.209,0,4,1.791,4,4c0,2.209-1.745,4-3.954,4c-0.031,0-0.046-0.008-0.046-0.01v0.002c0-2.14-1.9-3.891-3.891-4.62
+						C60.412,28.465,62.006,27.002,64,27.002z M67.977,35.486c1.238-1.1,2.023-2.699,2.023-4.484C70,27.689,67.313,25,64,25
+						c-2.974,0-5.436,2.002-5.91,5.002h0.002C58.061,30.002,58.031,30,58,30c-3.313,0-6,2.688-6,6.001
+						c0,1.785,0.785,3.386,2.023,4.484c-1.803,0.438-3.545,1.558-5.023,3.517v4c0,0.553,0.447,1,1,1h16c0.553,0,1-0.447,1-1v-4h5
+						c0.553,0,1-0.447,1-1v-4C71.562,37.023,69.779,35.924,67.977,35.486z"/>
+				</g>
+			</g>
+		</g>
+	</g>
+</g>
+</svg>

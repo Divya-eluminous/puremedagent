@@ -1,0 +1,25 @@
+/* --------- Modal Calendar scrollable ADD APPOINMENT MODAL POPUP -12-Jan-2022 --------- */
+
+body.sidebar-mini.layout-fixed.modal-open {
+    overflow-y: scroll;
+}
+
+/* --------- ADD APPOINMENT MODAL POPUP --------- */
+#addAppointmentModal .modal-dialog-scrollable .modal-content {    max-height: 100%;	overflow: visible;}
+#addAppointmentModal .modal-body.appointment-loader {    overflow: visible;	background:#fff;}
+#addAppointmentModal .modal-footer{	background:#fff;}
+div#addAppointmentModal {    position: absolute !important;}
+
+/* --------- EDIT MODAL POPUP --------- */
+#editAppointmentDataModal .modal-dialog-scrollable .modal-content {    max-height: 100%;	overflow: visible;}
+#editAppointmentDataModal .modal-body.appointment-loader, #editAppointmentDataModal .modal-body{    overflow: visible;	background:#fff;}
+#editAppointmentDataModal .modal-footer{	background:#fff;}
+div#editAppointmentDataModal{position: absolute !important;}
+
+
+/* --------- Assistant-dashboard EDIT MODAL POPUP --------- */
+.modal-open .modal#editAppointmentDataModal {
+    overflow-x: visible;
+    overflow-y: visible;
+}
+/* --------- Modal Calendar scrollable ADD APPOINMENT MODAL POPUP -12-Jan-2022 --------- */

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generator: Adobe Illustrator 17.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	 width="24px" height="24px" viewBox="0 0 24 24" enable-background="new 0 0 24 24" xml:space="preserve">
+<title>Orders</title>
+<desc>Created with Sketch.</desc>
+<g id="Dashboard">
+	<g id="Nav" transform="translate(-43.000000, -714.000000)">
+		<g transform="translate(-6.000000, 0.000000)">
+			<g id="Nav---Active-Links-and-Icons" transform="translate(0.000000, 80.000000)">
+				<g id="Active-Orders" transform="translate(0.000000, 612.000000)">
+					<g id="Orders" transform="translate(49.000000, 22.000000)">
+						<path id="Fill-1" fill="#285CAD" d="M20.25,16H6.75L5.25,5h16.5L20.25,16z M23,3H4.891L4.5,0.827C4.406,0.28,3.928,0,3.375,0
+							H1C0.447,0,0,0.447,0,1s0.447,1,1,1h1.664l0.49,3L5,17c0.137,0.506,0.447,1,1,1h15c0.553,0,0.953-0.594,1-1l2-13
+							C24.094,3.453,23.553,3,23,3z"/>
+						<path id="Fill-3" fill="#285CAD" d="M17.5,23c-0.828,0-1.5-0.672-1.5-1.5s0.672-1.5,1.5-1.5s1.5,0.672,1.5,1.5
+							S18.328,23,17.5,23 M17.5,19c-1.381,0-2.5,1.119-2.5,2.5s1.119,2.5,2.5,2.5s2.5-1.119,2.5-2.5S18.881,19,17.5,19"/>
+						<path id="Fill-5" fill="#285CAD" d="M8.5,23C7.672,23,7,22.328,7,21.5S7.672,20,8.5,20s1.5,0.672,1.5,1.5S9.328,23,8.5,23
+							 M8.5,19C7.119,19,6,20.119,6,21.5S7.119,24,8.5,24s2.5-1.119,2.5-2.5S9.881,19,8.5,19"/>
+						<polygon id="Fill-7" fill="#285CAD" points="19.777,8 19.889,7 7.111,7 7.223,8 						"/>
+						<polygon id="Fill-9" fill="#285CAD" points="7.444,10 19.556,10 19.667,9 7.333,9 						"/>
+						<polygon id="Fill-11" fill="#285CAD" points="7.667,12 19.333,12 19.444,11 7.556,11 						"/>
+						<polygon id="Fill-13" fill="#285CAD" points="7.889,14 19.111,14 19.223,13 7.777,13 						"/>
+					</g>
+				</g>
+			</g>
+		</g>
+	</g>
+</g>
+</svg>

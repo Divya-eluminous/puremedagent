@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Bundles</title>
+    <desc>Created with Sketch.</desc>
+    <g id="Dashboard" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" opacity="0.498018569">
+        <g transform="translate(-43.000000, -307.000000)" fill="#4A4A4A" id="Nav">
+            <g transform="translate(-6.000000, 0.000000)">
+                <g id="Nav-Icons" transform="translate(49.000000, 106.000000)">
+                    <g id="Bundles" transform="translate(0.000000, 201.000000)">
+                        <path d="M2,4 L22,4 L22,2 L2,2 L2,4 Z M2,7 L22,7 L22,5 L2,5 L2,7 Z M2,10 L22,10 L22,8 L2,8 L2,10 Z M2,13 L22,13 L22,11 L2,11 L2,13 Z M2,22 L22,22 L22,14 L2,14 L2,22 Z M23,0 L1,0 C0.447,0 0,0.447 0,1 L0,23 C0,23.553 0.447,24 1,24 L23,24 C23.553,24 24,23.553 24,23 L24,1 C24,0.447 23.553,0 23,0 Z" id="Fill-1"></path>
+                        <path d="M10,17 L14,17 L14,16 L10,16 L10,17 Z M9,18 L15,18 L15,15 L9,15 L9,18 Z" id="Fill-3"></path>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

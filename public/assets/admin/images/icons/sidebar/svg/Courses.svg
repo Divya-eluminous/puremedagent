@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22px" height="24px" viewBox="0 0 22 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Courses</title>
+    <desc>Created with Sketch.</desc>
+    <g id="Dashboard" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" opacity="0.498018569">
+        <g transform="translate(-43.000000, -240.000000)" fill="#4A4A4A" id="Nav">
+            <g transform="translate(-6.000000, 0.000000)">
+                <g id="Nav-Icons" transform="translate(49.000000, 106.000000)">
+                    <g id="Courses" transform="translate(0.000000, 134.000000)">
+                        <path d="M2,19 L20,19 L20,2 L2,2 L2,19 Z M2,22 L20,22 L20,20 L2,20 L2,22 Z M21,0 L1,0 C0.447,0 0,0.447 0,1 L0,23 C0,23.553 0.447,24 1,24 L21,24 C21.552,24 22,23.553 22,23 L22,1 C22,0.447 21.552,0 21,0 Z" id="Fill-1"></path>
+                        <path d="M6,11 L16,11 L16,6 L6,6 L6,11 Z M5,12 L17,12 L17,5 L5,5 L5,12 Z" id="Fill-3"></path>
+                        <polygon id="Fill-4" points="7 8 15 8 15 7 7 7"></polygon>
+                        <polygon id="Fill-5" points="7 10 15 10 15 9 7 9"></polygon>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

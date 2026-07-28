@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="20px" height="20px" viewBox="0 0 20 20" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Page 1</title>
+    <desc>Created with Sketch.</desc>
+    <g id="Customers" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="Customers---Manage-Customers" transform="translate(-1239.000000, -403.000000)" fill="#4361A5">
+            <g id="Customer-List" transform="translate(383.000000, 116.000000)">
+                <g id="Rows" transform="translate(4.000000, 283.000000)">
+                    <g id="Row-1">
+                        <g id="Action-Icons" transform="translate(787.000000, 4.000000)">
+                            <path d="M83.8928671,0 C84.405762,0 84.8220245,0.416262514 84.8220245,0.929157397 L84.8220245,19.8220245 L79.8665184,14.8665184 L65.9291574,14.8665184 C65.4162625,14.8665184 65,14.4502558 65,13.937361 L65,0.929157397 C65,0.416262514 65.4162625,0 65.9291574,0 L83.8928671,0 Z" id="Page-1"></path>
+                        </g>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

@@ -1,0 +1,44 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+
+class CreateAppointmentTypesTable extends Migration {
+
+	/**
+	 * Run the migrations.
+	 *
+	 * @return void
+	 */
+	public function up()
+	{
+		Schema::create('appointment_types', function(Blueprint $table)
+		{
+			$table->integer('id', true);
+			$table->integer('fk_specialist_id')->default(0);
+			$table->string('name')->nullable();
+			$table->integer('duration')->default(0);
+			$table->text('description', 65535);
+			$table->smallInteger('status')->default(1);
+			$table->smallInteger('recommend_exams')->default(0)->comment('0=>No(Dont show recommended examinations),1=>Show Recommended Exams');
+			$table->string('patient_document')->nullable();
+			$table->string('patient_document_path')->nullable();
+			$table->smallInteger('patient_document_status')->default(0)->comment('0=>Unread,1=>Read,2=>Sign');
+			$table->enum('on_dashboard', array('0','1'))->nullable()->default('0');
+			$table->timestamps();
+			$table->softDeletes();
+		});
+	}
+
+
+	/**
+	 * Reverse the migrations.
+	 *
+	 * @return void
+	 */
+	public function down()
+	{
+		Schema::drop('appointment_types');
+	}
+
+}

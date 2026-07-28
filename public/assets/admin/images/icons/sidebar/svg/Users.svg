@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="22px" viewBox="0 0 24 22" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Users</title>
+    <desc>Created with Sketch.</desc>
+    <defs>
+        <polygon id="path-1" points="0 22 24 22 24 0 0 0"></polygon>
+    </defs>
+    <g id="Dashboard" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" opacity="0.498018569">
+        <g transform="translate(-43.000000, -849.000000)" id="Nav">
+            <g transform="translate(-6.000000, 0.000000)">
+                <g id="Nav-Icons" transform="translate(49.000000, 106.000000)">
+                    <g id="Users" transform="translate(0.000000, 743.000000)">
+                        <path d="M18,11 C18,9.896 17.104,9 16,9 C14.896,9 14,9.896 14,11 C14,12.104 14.896,13 16,13 C17.104,13 18,12.104 18,11 Z M19.858,17 C19.412,15.278 17.86,14 15.999,14 C14.138,14 12.587,15.278 12.141,17 L19.858,17 Z M13,11 C13,9.343 14.344,8 16,8 C17.656,8 19,9.343 19,11 C19,11.963 18.539,12.81 17.834,13.358 C19.686,14.091 21,15.888 21,18 L11,18 C11,15.888 12.314,14.091 14.166,13.358 C13.461,12.81 13,11.963 13,11 Z" id="Fill-1" fill="#4A4A4A"></path>
+                        <mask id="mask-2" fill="white">
+                            <use xlink:href="#path-1"></use>
+                        </mask>
+                        <g id="Clip-4"></g>
+                        <polygon id="Fill-3" fill="#4A4A4A" mask="url(#mask-2)" points="4 16 9 16 9 15 4 15"></polygon>
+                        <polygon id="Fill-5" fill="#4A4A4A" mask="url(#mask-2)" points="4 14 9 14 9 13 4 13"></polygon>
+                        <polygon id="Fill-6" fill="#4A4A4A" mask="url(#mask-2)" points="4 12 9 12 9 11 4 11"></polygon>
+                        <path d="M22,20 L2,20 L2,6 L10,6 L10,7 C10,7.553 10.447,8 11,8 L13,8 C13.553,8 14,7.553 14,7 L14,6 L22,6 L22,20 Z M11,7 L13,7 L13,1 L11,1 L11,7 Z M23,4 L14,4 L14,1 C14,0.447 13.553,0 13,0 L11,0 C10.447,0 10,0.447 10,1 L10,4 L1,4 C0.447,4 0,4.447 0,5 L0,21 C0,21.553 0.447,22 1,22 L23,22 C23.553,22 24,21.553 24,21 L24,5 C24,4.447 23.553,4 23,4 Z" id="Fill-7" fill="#4A4A4A" mask="url(#mask-2)"></path>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

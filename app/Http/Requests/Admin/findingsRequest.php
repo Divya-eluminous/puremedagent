@@ -1,0 +1,35 @@
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class findingsRequest extends FormRequest
+{
+    public function authorize()
+    {
+        return true;
+    }
+
+    public function rules()
+    {
+        $id = base64_decode(base64_decode($this->route('setting'))) ?? null;   
+        // dd($id);
+        if ($id == null) 
+        {
+            return [
+                'keywords.*'     => 'required',
+                             
+            ];
+        }
+       
+    }
+
+    public function messages()
+    {
+        return [
+            'keywords.*.required' => __('admin.ERR_KEYWORD_REQUIRED'),
+                  
+        ];
+    }
+}

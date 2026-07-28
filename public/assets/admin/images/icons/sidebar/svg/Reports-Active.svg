@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generator: Adobe Illustrator 17.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+	 width="24px" height="24px" viewBox="0 0 24 24" enable-background="new 0 0 24 24" xml:space="preserve">
+<title>Reports</title>
+<desc>Created with Sketch.</desc>
+<path fill="#285CAD" d="M22.875,0H1.125C0.504,0,0,0.504,0,1.125v21.75C0,23.496,0.504,24,1.125,24h21.75
+	C23.496,24,24,23.496,24,22.875V1.125C24,0.504,23.496,0,22.875,0z M22,22H2V7h20V22z M22,6H2V2h20V6z"/>
+<path id="Fill-3" fill="#285CAD" d="M4,3c0.552,0,1,0.448,1,1S4.552,5,4,5S3,4.552,3,4S3.448,3,4,3"/>
+<path id="Fill-4" fill="#285CAD" d="M7,3c0.552,0,1,0.448,1,1S7.552,5,7,5S6,4.552,6,4S6.448,3,7,3"/>
+<path id="Fill-5" fill="#285CAD" d="M10,3c0.552,0,1,0.448,1,1s-0.448,1-1,1S9,4.552,9,4S9.448,3,10,3"/>
+<path fill="#285CAD" d="M10,12v8h4v-8H10z M13,19h-2v-6h2V19z"/>
+<path fill="#285CAD" d="M5,14v6h4v-6H5z M8,19H6v-4h2V19z"/>
+<path fill="#285CAD" d="M15,10v10h4V10H15z M18,19h-2v-8h2V19z"/>
+</svg>

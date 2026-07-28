@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Coupons</title>
+    <desc>Created with Sketch.</desc>
+    <g id="Dashboard" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" opacity="0.498018569">
+        <g transform="translate(-43.000000, -579.000000)" fill="#4A4A4A" id="Nav">
+            <g transform="translate(-6.000000, 0.000000)">
+                <g id="Nav-Icons" transform="translate(49.000000, 106.000000)">
+                    <g id="Coupons" transform="translate(0.000000, 472.000000)">
+                        <g id="Group-3" transform="translate(0.000000, 0.993500)">
+                            <path d="M21.9979,9.1335 L9.4079,21.6325 L2.4179,14.5965 L14.8709,2.0065 L21.9979,2.0065 L21.9979,9.1335 Z M15.1589,0.0065 C14.2079,0.0065 13.7869,0.4465 13.1949,1.0385 L0.2879,13.9685 C-0.0961,14.3535 -0.0961,14.9865 0.2879,15.3705 L8.6209,23.7105 C9.0059,24.0945 9.6259,24.0975 10.0109,23.7135 L22.9899,10.7835 C23.6799,10.0935 23.9979,9.5815 23.9979,8.8455 L23.9979,0.0065 L15.1589,0.0065 Z" id="Fill-1"></path>
+                        </g>
+                        <polygon id="Fill-4" points="9.2626 19.8491 5.0956 15.6831 5.7896 14.9891 9.9566 19.1541"></polygon>
+                        <polygon id="Fill-6" points="10.6976 18.4787 6.5306 14.3117 7.2246 13.6177 11.3916 17.7847"></polygon>
+                        <polygon id="Fill-8" points="12.0865 17.0892 7.9195 12.9222 8.6135 12.2282 12.7805 16.3952"></polygon>
+                        <path d="M17.9979,6 C18.5509,6 18.9979,6.447 18.9979,7 C18.9979,7.553 18.5509,8 17.9979,8 C17.4449,8 16.9979,7.553 16.9979,7 C16.9979,6.447 17.4449,6 17.9979,6 M17.9979,9 C19.1019,9 19.9979,8.104 19.9979,7 C19.9979,5.896 19.1019,5 17.9979,5 C16.8939,5 15.9979,5.896 15.9979,7 C15.9979,8.104 16.8939,9 17.9979,9" id="Fill-10"></path>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

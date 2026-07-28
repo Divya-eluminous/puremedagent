@@ -1,0 +1,116 @@
+.Safari .search-wrapper input,
+.Safari .search-wrapper select,
+.macchrome .search-wrapper input,
+.macchrome .search-wrapper select,
+.macFirefox .search-wrapper input,
+.macFirefox .search-wrapper select,
+.macFirefox .sbHolder {
+    padding: 0px 5px;
+}
+
+.macchrome input[type=text] {
+    padding-top: 3px;
+}
+
+.Safari .sbHolder a.sbSelector::after {
+    right: 10px;
+}
+
+.Safari .m-select li.f-12 {
+    height: 19px;
+    line-height: 21px;
+}
+
+/* button */
+.macchrome .blue-btn-inverse,
+.Safari .blue-btn-inverse,
+.macchrome .blue-btn,
+.Safari .blue-btn {
+    padding: 5px 20px 3px;
+}
+
+.macFirefox .blue-btn-inverse,
+.macFirefox .blue-btn {
+    padding: 6px 20px 2px;
+}
+
+.macFirefox .table a.blue-btn,
+.macFirefox .table a.blue-btn-inverse {
+    padding-bottom: 0px;
+}
+
+.Safari .table a.blue-btn,
+.Safari .table a.blue-btn-inverse,
+.macchrome .table a.blue-btn,
+.macchrome .table a.blue-btn-inverse {
+    padding: 0px 20px;
+    line-height: 30px;
+}
+
+/* pagination */
+.Safari .pagination>li>a,
+.Safari .pagination>li>span {
+    line-height: 35px;
+}
+
+.macFirefox .sbHolder a.sbSelector {
+    line-height: 32px;
+}
+
+/* dropdown */
+.Safari .sbHolder a.sbSelector {
+    padding-top: 2px;
+}
+
+.Safari table .sbHolder a.sbSelector {
+    padding: 2px 15px 0px 2px;
+}
+
+.macchrome .sbHolder a.sbSelector {
+    line-height: 30px;
+}
+
+/* pagination */
+
+.macchrome .pagination>li>a,
+.pagination>li>span {
+    padding: 0px;
+    line-height: 47px;
+}
+
+.macchrome .knob em,
+.Safari .knob em {
+    line-height: 30px;
+}
+
+.Safari .action-wrapper ul {
+    padding: 2px 0px;
+}
+
+
+/* ipad */
+.ipad input[type=text] {
+    padding-top: 7px;
+}
+
+.ipad .mh-200 .mCustomScrollBox.mCSB_inside {
+    height: 200px;
+}
+
+.ipad .mh-160 .mCustomScrollBox.mCSB_inside {
+    height: 160px;
+}
+
+input[type=text],
+.card input[type=text],
+.card input[type=email],
+input[type=password],
+.card input[type=date],
+textarea.form-control{
+	-webkit-box-shadow: none;
+	-moz-box-shadow: none;
+	box-shadow: none;
+	-webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24px" height="24px" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <!-- Generator: Sketch 52.5 (67469) - http://www.bohemiancoding.com/sketch -->
+    <title>Faculty</title>
+    <desc>Created with Sketch.</desc>
+    <g id="Dashboard" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" opacity="0.498018569">
+        <g transform="translate(-43.000000, -645.000000)" fill="#4A4A4A" id="Nav">
+            <g transform="translate(-6.000000, 0.000000)">
+                <g id="Nav-Icons" transform="translate(49.000000, 106.000000)">
+                    <g id="Faculty" transform="translate(0.000000, 539.000000)">
+                        <path d="M12,2 C15.004,2 17.486,4.211 17.924,7.094 C16.483,6.449 15.209,5.498 14.227,4.285 C14,4 13.86,3.844 13.627,3.459 C13.359,3.781 13.203,3.969 12.922,4.207 C11.145,5.914 8.742,6.972 6.091,6.996 C6.569,4.161 9.029,2 12,2 Z M8.686,13 C7.069,11.926 6,10.088 6,8 C8.914,8 11.555,6.859 13.523,5.01 C14.701,6.433 16.236,7.539 17.986,8.221 C17.912,10.216 16.874,11.964 15.314,13 L18.24,13 C19.339,11.63 20,9.893 20,8 C20,3.582 16.418,0 12,0 C7.582,0 4,3.582 4,8 C4,9.893 4.661,11.63 5.76,13 L8.686,13 Z" id="Fill-1"></path>
+                        <path d="M22,22 L2,22 L2,20 C2,17.791 3.791,16 6,16 L18,16 C20.209,16 22,17.791 22,20 L22,22 Z M18,14 L6,14 C2.687,14 0,16.687 0,20 L0,23 C0,23.553 0.447,24 1,24 L23,24 C23.553,24 24,23.553 24,23 L24,20 C24,16.687 21.313,14 18,14 Z" id="Fill-3"></path>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>
