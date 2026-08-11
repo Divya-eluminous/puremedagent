@@ -19,6 +19,8 @@ interface NluDriver
      * @param  string  $step  the conversation step being answered
      * @param  array<int, string>  $optionLabels  labels already shown to the patient
      * @param  string  $message  what the patient typed or said
+     * @param  array{doctor?: ?string, appointment?: ?string, date?: ?string, time?: ?string}  $context
+     *         display labels for what the patient has already chosen - never ids
      * @return array{intent: string, entity: ?string, ordinal: ?int, date: ?string,
      *               time_preference: ?string, time: ?string, confidence: float}|null
      */
@@ -26,6 +28,7 @@ interface NluDriver
         string $step,
         array $optionLabels,
         string $message,
-        ?string $previousAssistantMessage = null
+        ?string $previousAssistantMessage = null,
+        array $context = []
     ): ?array;
 }

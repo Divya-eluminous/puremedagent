@@ -40,15 +40,16 @@ class OllamaNluService implements NluDriver
         'view_appointments',
         'cancel_appointment',
         'select_doctor',
+        'change_doctor',
         'select_appointment_type',
-        'select_date',
+        'change_appointment_type',
         'select_slot',
+        'change_slot',
+        'select_slot_preference',
+        'change_date',
         'request_slots',
-        'change_selection',
         'confirm_booking',
         'reject_booking',
-        'greeting',
-        'help',
         'unknown',
     ];
 
@@ -58,7 +59,7 @@ class OllamaNluService implements NluDriver
     private const MAX_OPTIONS = 40;
     private const MAX_OPTION_CHARS = 80;
 
-    public function interpret(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null): ?array
+    public function interpret(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null, array $context = []): ?array
     {
         if (!$this->enabled()) {
             return null;
@@ -85,7 +86,7 @@ class OllamaNluService implements NluDriver
                 ->asJson()
                 ->post(
                     rtrim((string) config('ai-assistant.ollama.base_url'), '/') . '/api/chat',
-                    $this->payload($step, $optionLabels, $message, $previousAssistantMessage)
+                    $this->payload($step, $optionLabels, $message, $previousAssistantMessage, $context)
                 );
         } catch (Throwable $exception) {
             // The patient's words are never logged.
@@ -140,7 +141,7 @@ class OllamaNluService implements NluDriver
      * @param  array<int, string>  $optionLabels
      * @return array<string, mixed>
      */
-    private function payload(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null): array
+    private function payload(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null, array $context = []): array
     {
         return [
             'model' => (string) config('ai-assistant.ollama.model'),
@@ -153,7 +154,7 @@ class OllamaNluService implements NluDriver
             ],
             'messages' => [
                 ['role' => 'system', 'content' => $this->systemPrompt()],
-                ['role' => 'user', 'content' => $this->userPrompt($step, $optionLabels, $message, $previousAssistantMessage)],
+                ['role' => 'user', 'content' => $this->userPrompt($step, $optionLabels, $message, $previousAssistantMessage, $context)],
             ],
         ];
     }
@@ -171,8 +172,17 @@ class OllamaNluService implements NluDriver
             . 'rejecting anything, for example "you have not shown me the slots", "what times are '
             . 'available", "let me see the available times", "are there any other times". '
             . 'Use reject_booking only when they are declining the appointment itself. '
-            . 'Use change_selection when they want to swap a choice they already made, for example '
-            . '"no, I meant Dr Gunnar" or "I want a different time". '
+            . 'When the patient wants to swap something in CURRENT SELECTION, use the intent for the '
+            . 'part they are changing: change_doctor ("another doctor", "someone else"), '
+            . 'change_appointment_type, change_date ("what about Friday", "any day next week") or '
+            . 'change_slot ("another time", "something later"). Change only what they actually '
+            . 'mentioned: "another time" does not change the date, and "another doctor" does not '
+            . 'change the appointment type or the time. A patient may change two things at once, for '
+            . 'example "another doctor tomorrow" - return change_doctor and put the day in "date". '
+            . 'Use select_slot_preference when they name only a part of the day, such as "morning". '
+            . 'CURRENT SELECTION is background only. Never copy anything out of it into your answer: '
+            . '"date" and "time" must be the patient\'s own words, and must be null when the patient '
+            . 'did not mention a day or a time. '
             . 'If the patient does not mind which option, return the select intent with entity and '
             . 'ordinal both null - never pick one for them. '
             . 'If you are unsure, return intent "unknown" with a low confidence.';
@@ -184,9 +194,27 @@ class OllamaNluService implements NluDriver
      *
      * @param  array<int, string>  $optionLabels
      */
-    private function userPrompt(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null): string
+    private function userPrompt(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null, array $context = []): string
     {
         $prompt = 'CURRENT STEP: ' . $step . "\n";
+
+        // What the patient has chosen so far, as the labels already on their
+        // screen. Without this "another doctor" and "another time" look
+        // identical to the model. Labels only - never ids, never patient data.
+        $selection = array_filter([
+            'Doctor' => $context['doctor'] ?? null,
+            'Appointment' => $context['appointment'] ?? null,
+            'Date' => $context['date'] ?? null,
+            'Time' => $context['time'] ?? null,
+        ]);
+
+        if ($selection) {
+            $prompt .= "CURRENT SELECTION:\n";
+
+            foreach ($selection as $label => $value) {
+                $prompt .= '- ' . $label . ': ' . mb_substr((string) $value, 0, self::MAX_OPTION_CHARS) . "\n";
+            }
+        }
 
         $options = array_slice(array_values(array_filter($optionLabels)), 0, self::MAX_OPTIONS);
 
