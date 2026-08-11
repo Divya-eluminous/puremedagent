@@ -27,7 +27,8 @@ class NluManager implements NluDriver
         string $step,
         array $optionLabels,
         string $message,
-        ?string $previousAssistantMessage = null
+        ?string $previousAssistantMessage = null,
+        array $context = []
     ): ?array {
         $driver = $this->driver();
 
@@ -35,13 +36,13 @@ class NluManager implements NluDriver
             return null;
         }
 
-        $result = $driver->interpret($step, $optionLabels, $message, $previousAssistantMessage);
+        $result = $driver->interpret($step, $optionLabels, $message, $previousAssistantMessage, $context);
 
         if ($result === null) {
             return null;
         }
 
-        return $this->guard($result, $optionLabels, $step);
+        return $this->guard($result, $optionLabels, $step, $context);
     }
 
     private function driver(): ?NluDriver
@@ -60,9 +61,24 @@ class NluManager implements NluDriver
      * @param  array<int, string>  $optionLabels
      * @return array<string, mixed>|null
      */
-    private function guard(array $result, array $optionLabels, string $step): ?array
+    private function guard(array $result, array $optionLabels, string $step, array $context = []): ?array
     {
         $labels = array_values(array_filter($optionLabels));
+
+        // PROTECTION 3 (checked first, before the entity rules below): a small
+        // model reads CURRENT SELECTION as something the
+        // patient said and hands the already-chosen day or time straight back.
+        // Measured on llama3.2:3b: "no I do not want this appointment" returned
+        // the selected date, which would have replayed a rejection as a date
+        // pick. A patient re-picking what is already selected changes nothing,
+        // so echoes are always safe to drop.
+        foreach (['date' => 'date', 'time' => 'time'] as $field => $contextKey) {
+            if (!empty($result[$field]) && !empty($context[$contextKey])
+                && $this->normalise((string) $result[$field]) === $this->normalise((string) $context[$contextKey])) {
+                Log::info('AI assistant NLU: discarded echoed ' . $field, ['step' => $step]);
+                $result[$field] = null;
+            }
+        }
 
         // Models like to echo the list numbering back, e.g. "2. Dr Gunnar Gauff".
         $entity = $this->stripNumbering($result['entity'] ?? null);
@@ -106,9 +122,13 @@ class NluManager implements NluDriver
         // Some intents are meaningful on their own - "show me the slots" carries
         // no entity by design, and "I don't mind which doctor" deliberately
         // carries none either.
+        // "another doctor" and "show me the times" name nothing by design, and
+        // "I don't mind which doctor" deliberately names nothing either.
         $standalone = in_array($result['intent'] ?? '', [
-            'request_slots', 'confirm_booking', 'reject_booking', 'change_selection',
-            'book_appointment', 'view_appointments', 'cancel_appointment', 'help', 'greeting',
+            'request_slots', 'confirm_booking', 'reject_booking',
+            'change_doctor', 'change_appointment_type', 'change_slot', 'change_date',
+            'select_slot_preference',
+            'book_appointment', 'view_appointments', 'cancel_appointment',
         ], true);
 
         // Nothing usable left: let the deterministic re-ask handle it.

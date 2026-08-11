@@ -143,6 +143,36 @@
         border-bottom-right-radius: 6px;
     }
 
+    /* Correcting the last message. Only ever one of these on screen, sitting
+       quietly beside the newest reply until it is hovered. */
+    .pm-row.user { align-items: center; gap: 6px; }
+
+    .pm-edit {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid var(--pm-line);
+        border-radius: 50%;
+        background: #fff;
+        color: #6b7f9e;
+        cursor: pointer;
+        opacity: 0.55;
+        transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .pm-edit:hover,
+    .pm-edit:focus-visible {
+        opacity: 1;
+        color: var(--pm-blue);
+        border-color: var(--pm-blue);
+    }
+
+    .pm-edit svg { width: 13px; height: 13px; }
+
     .pm-row.assistant .pm-bubble.error {
         background: #fff5f5;
         border-color: #fecdd3;
@@ -331,6 +361,7 @@
 
     var ENDPOINT = @json(route('ai-assistant.message'));
     var RESET_ENDPOINT = @json(route('ai-assistant.reset'));
+    var EDIT_ENDPOINT = @json(route('ai-assistant.edit'));
     var CSRF = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
 
     var stream = document.getElementById('pmStream');
@@ -348,6 +379,13 @@
     var pendingStatus = null;
     // Set when the pending message came from the microphone rather than typing.
     var spokenSubmission = false;
+
+    // The bubbles belonging to the newest typed or spoken turn, so a correction
+    // can take them back off the screen. Only ever the latest turn: older ones
+    // are forgotten as soon as the next message is sent.
+    var turn = null;
+    var editControl = null;
+    var editing = false;
 
     /* ---------------- rendering ---------------- */
 
@@ -413,6 +451,117 @@
         return row;
     }
 
+    var SPOKEN_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+
+    function ordinalSuffix(day) {
+        if (day % 100 >= 11 && day % 100 <= 13) { return 'th'; }
+        return ({ 1: 'st', 2: 'nd', 3: 'rd' })[day % 10] || 'th';
+    }
+
+    /**
+     * "14:00" read aloud as "fourteen hundred" - or worse - is not how anyone
+     * says a time. The screen keeps the practice's 24-hour format; only the
+     * spoken version is turned into something a receptionist would say.
+     */
+    function spokenTime(hour, minute) {
+        if (hour === 0 && minute === 0) { return 'midnight'; }
+        if (hour === 12 && minute === 0) { return 'midday'; }
+
+        var hour12 = hour % 12 === 0 ? 12 : hour % 12;
+        var part = hour < 12 ? 'in the morning' : (hour < 17 ? 'in the afternoon' : 'in the evening');
+        var minutes = '';
+
+        if (minute > 0) { minutes = minute < 10 ? ' oh ' + minute : ' ' + minute; }
+
+        return hour12 + minutes + ' ' + part;
+    }
+
+    /** The spoken form of a message. The displayed text is never changed. */
+    function speakable(text) {
+        if (!text) { return text; }
+
+        // 13.08.2026 -> "the 13th of August", which reads as "the thirteenth".
+        text = text.replace(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/g, function (whole, day, month) {
+            var d = parseInt(day, 10);
+            var m = parseInt(month, 10);
+
+            if (!d || d > 31 || !m || m > 12) { return whole; }
+
+            return 'the ' + d + ordinalSuffix(d) + ' of ' + SPOKEN_MONTHS[m - 1];
+        });
+
+        return text.replace(/\b(\d{1,2}):(\d{2})\b/g, function (whole, hour, minute) {
+            var h = parseInt(hour, 10);
+            var m = parseInt(minute, 10);
+
+            if (h > 23 || m > 59) { return whole; }
+
+            return spokenTime(h, m);
+        });
+    }
+
+    function removeEditControl() {
+        if (editControl && editControl.parentNode) { editControl.remove(); }
+        editControl = null;
+    }
+
+    /**
+     * Offer to correct the message just sent.
+     *
+     * Shown only when the server says so - after a booking or a cancellation it
+     * says no, because that has already happened at the practice.
+     */
+    function offerEdit(allowed) {
+        removeEditControl();
+
+        if (!allowed || !turn || !turn.userRow) { return; }
+
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'pm-edit';
+        button.title = 'Edit this message';
+        button.setAttribute('aria-label', 'Edit this message');
+        button.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" '
+            + 'stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.9l2.6 2.6"/>'
+            + '<path d="M12.3 1.1a1.2 1.2 0 011.7 1.7L5.2 11.6l-2.7.8.8-2.7z"/></svg>';
+        button.addEventListener('click', beginEdit);
+
+        // Before the bubble, so it sits to its left on a right-aligned row.
+        turn.userRow.insertBefore(button, turn.userRow.firstChild);
+        editControl = button;
+    }
+
+    /**
+     * Take the last turn back off the screen and put the words back in the box.
+     *
+     * Nothing is sent yet - the patient edits the text and sends it themselves,
+     * by keyboard or by voice, exactly as they would any other message.
+     */
+    function beginEdit() {
+        if (busy || !turn) { return; }
+
+        voiceOutput.stop();
+        removeEditControl();
+        clearCards();
+
+        if (turn.userRow && turn.userRow.parentNode) { turn.userRow.remove(); }
+
+        for (var i = 0; i < turn.assistantRows.length; i++) {
+            var row = turn.assistantRows[i];
+            if (row && row.parentNode) { row.remove(); }
+        }
+
+        input.value = turn.text;
+        turn = null;
+        editing = true;
+
+        applyInput({ enabled: true });
+        autoGrow();
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+    }
+
     function showTyping() {
         var bubble = document.createElement('div');
         bubble.className = 'pm-bubble';
@@ -467,6 +616,13 @@
 
             chip.addEventListener('click', function () {
                 if (busy) { return; }
+
+                // A tapped chip is exactly what the patient meant, so there is
+                // nothing to correct. The previous turn stops being editable.
+                removeEditControl();
+                turn = null;
+                editing = false;
+
                 // "Show more" is not something the patient said, so it does not
                 // belong in the transcript as their message.
                 if (item.value !== '__more__') { addBubble('user', item.title); }
@@ -580,7 +736,7 @@
         };
     }
 
-    function send(payload) {
+    function send(payload, endpoint) {
         if (busy) { return; }
         voiceOutput.stop();
         clearCards();
@@ -589,7 +745,7 @@
         var typing = runStatus(pendingStatus);
         pendingStatus = null;
 
-        fetch(ENDPOINT, {
+        fetch(endpoint || ENDPOINT, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -601,6 +757,14 @@
             body: JSON.stringify(payload || {})
         })
             .then(function (response) {
+                // The server declined the correction - usually because the
+                // appointment has since been settled with the practice. That is
+                // an answer, not a failure, so it is said in its own words.
+                if (response.status === 409) {
+                    return response.json().then(function (data) {
+                        throw { spoken: data.error || 'I cannot change that message now.' };
+                    });
+                }
                 if (!response.ok) { throw new Error('HTTP ' + response.status); }
                 return response.json();
             })
@@ -608,9 +772,11 @@
                 typing.stop();
                 paint(data);
             })
-            .catch(function () {
+            .catch(function (error) {
                 typing.stop();
-                addBubble('assistant', 'Sorry, I lost the connection for a moment. Could you say that again?', 'error');
+                addBubble('assistant', (error && error.spoken)
+                    ? error.spoken
+                    : 'Sorry, I lost the connection for a moment. Could you say that again?', 'error');
                 setBusy(false);
             });
     }
@@ -629,13 +795,18 @@
                 applyInput(data.input);
                 pendingStatus = data.pending || null;
                 setBusy(false);
+                offerEdit(data.can_edit);
                 resumeListening(data);
                 return;
             }
 
             var message = messages[index++];
-            addBubble('assistant', message.text, message.kind);
-            voiceOutput.speak(message.text);
+            var row = addBubble('assistant', message.text, message.kind);
+
+            // Part of the turn a correction would take back off the screen.
+            if (turn) { turn.assistantRows.push(row); }
+
+            voiceOutput.speak(speakable(message.text));
 
             // The assistant has asked for the keyboard, so stop listening -
             // reopening the mic here would just mishear the same thing again.
@@ -670,16 +841,30 @@
 
         // "start over" and friends are handled by the server so every phrasing
         // behaves the same. The Start over button is the explicit reset.
-        addBubble('user', text);
+        removeEditControl();
+
+        // This message replaces whatever came before it as the one that can be
+        // corrected, so the previous turn's bubbles are let go of here.
+        turn = { userRow: addBubble('user', text), assistantRows: [], text: text, source: source };
+
+        var correcting = editing;
+        editing = false;
+
         input.value = '';
         autoGrow();
-        send({ text: text, source: source });
+        send({ text: text, source: source }, correcting ? EDIT_ENDPOINT : null);
     }
 
     function restart() {
         if (busy) { return; }
         voiceOutput.stop();
         clearCards();
+
+        // A fresh conversation has no last message to correct.
+        removeEditControl();
+        turn = null;
+        editing = false;
+
         setBusy(true);
 
         fetch(RESET_ENDPOINT, {
