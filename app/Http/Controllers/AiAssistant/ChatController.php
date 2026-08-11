@@ -209,7 +209,9 @@ class ChatController extends Controller
         // message stacks duplicate cards down the chat.
         $alreadyDone = $state['step'] === 'done' && $stepBefore === 'done' && !$starting;
 
-        if (!$rejected && !$alreadyDone && !$suppressPrompt) {
+        // A step with no question of its own - the closed conversation - must
+        // not add an empty bubble.
+        if (!$rejected && !$alreadyDone && !$suppressPrompt && trim((string) $prompt['text']) !== '') {
             $replies[] = $this->say($prompt['text']);
         }
 
@@ -386,8 +388,12 @@ class ChatController extends Controller
         if ($choiceValue === self::MORE || $this->wantsMore($text)) {
             $state['chip_page'] = ($state['chip_page'] ?? 0) + 1;
             $state['_no_prompt'] = true;
+            // The rules have answered this; the LLM must not read it as a choice.
+            $state['_handled'] = true;
 
-            return [];
+            // A tapped chip speaks for itself. Someone who asked out loud gets
+            // an answer - they may not be able to see the chips arrive.
+            return $choiceValue === self::MORE ? [] : [$this->say('Of course - here are a few more.')];
         }
 
         // Handled server side as well as in the browser, so a spoken "could you
@@ -440,6 +446,18 @@ class ChatController extends Controller
 
                 return [$this->say("Thanks, I've updated your email to " . $corrected . ".")];
             }
+        }
+
+        // A follow-up about the appointments just listed - "and the second one?"
+        // - is answered from the list already held, not by fetching it again.
+        // Checked before both hatches below: "when is my next appointment"
+        // reads as a request for the whole list, and the bare word
+        // "appointment" reads as a new booking.
+        if ($state['step'] === 'appointments' && $choiceValue === ''
+            && ($answer = $this->answerAppointmentQuestion($state, $text))) {
+            $state['_handled'] = true;
+
+            return $answer;
         }
 
         // Asking to see or cancel appointments works from any point once we know
@@ -928,6 +946,7 @@ class ChatController extends Controller
             case 'cancel_confirm':
                 if (!$this->saidYes($choiceValue, $text)) {
                     $state['cancel_target'] = null;
+                    $state['rebook_after_cancel'] = false;
                     $state['step'] = $state['appointment'] ? 'done' : 'doctor';
 
                     return [$this->say("I've kept that appointment. Nothing has been cancelled.")];
@@ -940,6 +959,12 @@ class ChatController extends Controller
                     return $this->loadPastAppointments($state, $client);
                 }
 
+                if ($choiceValue === '' && $this->saidNothingElse($text)) {
+                    return $this->closeConversation($state);
+                }
+
+                // Follow-up questions about the list are answered further up,
+                // before the appointment-list and booking hatches.
                 if ($choiceValue === 'book' || $this->wantsBooking($text)) {
                     return $this->startBooking($state, $client);
                 }
@@ -947,6 +972,14 @@ class ChatController extends Controller
                 return [$this->say("I can book a new appointment or cancel one for you - just say which.")];
 
             case 'cancelled':
+            case 'closed':
+                // "Is there anything else?" has just been asked, so a plain
+                // "no" is an answer to it. Without this it matched nothing and
+                // the same menu was repeated at every further message.
+                if ($choiceValue === '' && $this->saidNothingElse($text)) {
+                    return $this->closeConversation($state);
+                }
+
                 if ($this->wantsBooking($text)) {
                     return $this->beginAnotherBooking($state, $client, $text);
                 }
@@ -954,6 +987,23 @@ class ChatController extends Controller
                 return [$this->say("Anything else? Say 'cancel my appointment' to cancel another, or 'book another' to make a new one.")];
 
             case 'done':
+                if ($choiceValue === '' && $this->saidNothingElse($text)) {
+                    return $this->closeConversation($state);
+                }
+
+                // "Change the time for this appointment" is neither a new
+                // booking nor a question. Checked before wantsBooking, which
+                // reads the word "appointment" and would start again from
+                // scratch - leaving the original still booked.
+                if ($state['appointment'] && $choiceValue === '' && $this->wantsReschedule($text)) {
+                    $state['cancel_target'] = $state['appointment'];
+                    $state['rebook_after_cancel'] = true;
+                    $state['step'] = 'cancel_confirm';
+                    $state['_handled'] = true;
+
+                    return [$this->say("I can't move an appointment once it is booked, but I can cancel this one and book you a new time.")];
+                }
+
                 // "I want to book an appointment for tomorrow morning" is a new
                 // booking, not a question about the finished one. Only the exact
                 // phrase "start over" used to be recognised here.
@@ -1118,6 +1168,15 @@ class ChatController extends Controller
             case 'cancelled':
                 return [
                     'text' => 'Is there anything else I can help you with?',
+                    'input' => $this->input("Say 'book another' to make a new appointment"),
+                ];
+
+            case 'closed':
+                // The conversation has been closed politely. Asking "anything
+                // else?" again underneath would undo the goodbye - the patient
+                // can still type, and every flow is still reachable.
+                return [
+                    'text' => '',
                     'input' => $this->input("Say 'book another' to make a new appointment"),
                 ];
 
@@ -1394,6 +1453,10 @@ class ChatController extends Controller
      */
     private function loadCancellableAppointments(array &$state, PureMedApiClient $client): array
     {
+        // Cancelling is its own subject; the viewing context ends here.
+        $state['appointments_context'] = [];
+        $state['discussed_appointment'] = 0;
+
         $result = $client->getAppointments($state['token'], [
             'patient_id' => $state['patient_id'],
             // get-appointment only filters out past appointments when this is
@@ -1446,6 +1509,10 @@ class ChatController extends Controller
 
         $state['cancellable'] = $appointments;
         $state['appointment_list'] = $this->appointmentRows($appointments);
+        // Kept for follow-up questions about this same list.
+        $state['appointments_context'] = $appointments;
+        // The next one is named below, so that is what has been discussed.
+        $state['discussed_appointment'] = 1;
 
         $next = $appointments[0];
 
@@ -1515,6 +1582,8 @@ class ChatController extends Controller
     private function beginAnotherBooking(array &$state, PureMedApiClient $client, string $text): array
     {
         $state = array_merge($state, [
+            'appointments_context' => [],
+            'discussed_appointment' => 0,
             'doctor' => null,
             'appointment_types' => [],
             'appointment_type' => null,
@@ -1687,6 +1756,10 @@ class ChatController extends Controller
     private function startBooking(array &$state, PureMedApiClient $client): array
     {
         $state['goal'] = 'book';
+        // A new booking is a change of subject: questions about the listed
+        // appointments no longer have a list to be about.
+        $state['appointments_context'] = [];
+        $state['discussed_appointment'] = 0;
 
         if (!empty($state['doctors'])) {
             $state['step'] = 'doctor';
@@ -1721,6 +1794,8 @@ class ChatController extends Controller
 
         if (!$result['ok']) {
             $state['step'] = 'cancel_select';
+            // The appointment still stands, so there is nothing to rebook.
+            $state['rebook_after_cancel'] = false;
 
             return [$this->say($this->readableError($result, "I couldn't cancel that appointment. Please contact the practice."), 'error')];
         }
@@ -1734,6 +1809,27 @@ class ChatController extends Controller
         $state['cancellable'] = [];
         $state['cancel_target'] = null;
         $state['step'] = 'cancelled';
+
+        // Changing the time is a cancellation followed by a booking, because
+        // PureMed has no way to move an appointment. The cancellation has now
+        // really happened, so say so plainly before going on - the patient must
+        // never be left thinking the old time is still held for them.
+        if (!empty($state['rebook_after_cancel'])) {
+            $state['rebook_after_cancel'] = false;
+
+            $replies = [$this->say('Done - your appointment on ' . $this->appointmentLabel($target)
+                . ' has been cancelled. Now let me find you a new time.')];
+
+            // Same doctor and same appointment type: they asked to change the
+            // time, nothing else. Times come from PureMed, as always.
+            if ($state['doctor'] && $state['appointment_type']) {
+                return array_merge($replies, $this->loadSlots($state, $client));
+            }
+
+            $state['step'] = $state['doctor'] ? 'appointment_type' : 'doctor';
+
+            return $replies;
+        }
 
         return [$this->say('Done - your appointment on ' . $this->appointmentLabel($target) . ' has been cancelled. The time is free for someone else now.')];
     }
@@ -1918,6 +2014,13 @@ class ChatController extends Controller
     /** get-appointment returns start_date as Y-m-d H:i:s. */
     private function appointmentLabel(array $appointment): string
     {
+        // Two shapes reach here: one listed by PureMed for cancelling, which
+        // carries start_date, and the booking just made in this chat, which
+        // carries the day and time already formatted for the patient.
+        if (!empty($appointment['date'])) {
+            return trim($appointment['date'] . ' ' . (string) ($appointment['time'] ?? ''));
+        }
+
         try {
             return Carbon::parse($appointment['start_date'])->format('d.m.Y H:i');
         } catch (\Throwable $exception) {
@@ -2331,6 +2434,17 @@ class ChatController extends Controller
             }
         }
 
+        // A bare "15" answering "which time suits?" is three o'clock, not the
+        // fifteenth chip in the list. The positional matcher below used to
+        // count down the times and land on whatever sat at that position -
+        // 16:20, on a list starting at 14:00. Named positions ("the second
+        // one", "number 15") still reach that matcher untouched.
+        $byBareHour = $this->matchSlotByHour($visible, $text, true);
+
+        if ($byBareHour) {
+            return $byBareHour;
+        }
+
         // "earliest", "morning", "afternoon", "anything after 2" - people ask
         // for a part of the day far more often than an exact minute.
         $preferred = $this->matchSlotByPreference($visible, $this->normalizeText($text));
@@ -2339,8 +2453,7 @@ class ChatController extends Controller
             return $preferred;
         }
 
-        // "book me in for 7" means seven o'clock. Checked after the positional
-        // matcher so "the 2nd one" still means the second option.
+        // "book me in for 7" means seven o'clock.
         return $this->matchSlotByHour($visible, $text);
     }
 
@@ -2353,15 +2466,18 @@ class ChatController extends Controller
      *
      * @param  array<int, array>  $slots
      */
-    private function matchSlotByHour(array $slots, string $text): ?array
+    private function matchSlotByHour(array $slots, string $text, bool $allowBareNumber = false): ?array
     {
         $value = $this->normalizeText($text);
 
-        if (!preg_match('/\b(?:at|for|around|about|by|from|near)\s+(\d{1,2})\b/', $value, $matches)) {
+        if (preg_match('/\b(?:at|for|around|about|by|from|near)\s+(\d{1,2})\b/', $value, $matches)) {
+            $hour = (int) $matches[1];
+        } elseif ($allowBareNumber && preg_match('/^(\d{1,2})$/', $value, $matches)) {
+            // Answering "15" to "which time suits?" is an hour, not a position.
+            $hour = (int) $matches[1];
+        } else {
             return null;
         }
-
-        $hour = (int) $matches[1];
 
         if ($hour > 23) {
             return null;
@@ -2624,11 +2740,23 @@ class ChatController extends Controller
         $weekdays = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday'
             . '|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag';
 
-        return preg_match('/\b\d{1,2}\s*(?:' . $months . ')\b/u', $value) === 1
+        if (preg_match('/\b\d{1,2}\s*(?:' . $months . ')\b/u', $value) === 1
             || preg_match('/\b(?:' . $months . ')\s*\d{1,2}\b/u', $value) === 1
-            || preg_match('/\b\d{1,2}[.\/-]\d{1,2}\b/', $text) === 1
             || preg_match('/\b(tomorrow|today|day after tomorrow|tonight|heute|morgen)\b/u', $value) === 1
-            || preg_match('/\b(?:' . $weekdays . ')\b/u', $value) === 1;
+            || preg_match('/\b(?:' . $weekdays . ')\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "13.08" is a day; "15.00" and "16.20" are how times are written here.
+        // The only thing telling them apart is whether the second part could be
+        // a month, so an impossible month means this is a clock time.
+        if (preg_match('/\b(\d{1,2})[.\/-](\d{1,2})\b/', $text, $parts) === 1) {
+            $month = (int) $parts[2];
+
+            return $month >= 1 && $month <= 12;
+        }
+
+        return false;
     }
 
     /** Whole-word containment, so "5" does not match inside "540". */
@@ -2637,12 +2765,187 @@ class ChatController extends Controller
         return (bool) preg_match('/(?<!\w)' . preg_quote($needle, '/') . '(?!\w)/u', $haystack);
     }
 
+    /**
+     * "No, thanks" to "Is there anything else I can help you with?".
+     *
+     * Only ever consulted in the post-action steps, where that question has
+     * just been asked. A bare "no" anywhere else still means what it means
+     * there - declining a time, keeping an appointment - and is untouched.
+     */
+    private function saidNothingElse(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        // Politeness wrapped around a request is still a request: "thanks, book
+        // another one" must book, and "no, show my appointments" must list.
+        if (preg_match('/\b(book|cancel|reschedule|rebook|change|move|show|list)\b/u', $value) === 1) {
+            return false;
+        }
+
+        // "no thanks", "nope", "not right now", "no I'm fine"
+        if (preg_match('/^(no|nope|nah|nein)\b/u', $value) === 1) {
+            return true;
+        }
+
+        // Gratitude on its own ends a conversation just as plainly as "no"
+        // does - "thanks", "thank you very much", "cheers". Only reachable in
+        // the post-action steps, so it can never be read as an intent.
+        if (preg_match('/\b(thank|thanks|thankyou|thx|cheers|danke|appreciate)/u', $value) === 1) {
+            return true;
+        }
+
+        return preg_match(
+            '/\b(nothing else|nothing more|nothing|that s all|thats all|that is all|that s it|thats it'
+            . '|i m done|im done|i am done|all done|we re done|not right now|not now'
+            . '|that will be all|all good|i m good|im good|i m fine|im fine)\b/u',
+            $value
+        ) === 1;
+    }
+
+    /**
+     * End the conversation warmly, without offering the menu again.
+     */
+    private function closeConversation(array &$state): array
+    {
+        $name = $state['patient']['first_name'] ?? null;
+        $state['step'] = 'closed';
+        // The goodbye is the whole answer; "anything else?" underneath it would
+        // be the very thing the patient just declined.
+        $state['_no_prompt'] = true;
+        $state['_handled'] = true;
+
+        return [$this->say($name
+            ? "You're welcome, " . $name . '. Have a great day!'
+            : "You're welcome. Have a great day!")];
+    }
+
+    /**
+     * Which of the appointments just listed the patient is asking about.
+     *
+     * Returns a 1-based position, or null when the message is not a reference
+     * at all. The position is all this decides - the answer itself is read from
+     * the PureMed list held in state, never composed from the patient's words.
+     *
+     * @param  int  $discussed  the position last talked about, for "the other one"
+     */
+    private function appointmentReference(string $text, int $count, int $discussed = 0): ?int
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '' || $count < 1) {
+            return null;
+        }
+
+        // Booking and cancelling are their own flows and must win outright.
+        if (preg_match('/\b(book|cancel)\b/u', $value) === 1) {
+            return null;
+        }
+
+        $found = null;
+        $at = -1;
+
+        // The LAST reference in the sentence is the one being asked about:
+        // "I know the first one, when is the second?" is about the second.
+        $take = function (string $pattern, callable $position) use ($value, &$found, &$at) {
+            if (preg_match($pattern, $value, $matches, PREG_OFFSET_CAPTURE) === 1 && $matches[0][1] > $at) {
+                $at = $matches[0][1];
+                $found = $position($matches);
+            }
+        };
+
+        foreach (['first' => 1, 'second' => 2, 'third' => 3, 'fourth' => 4, 'fifth' => 5] as $word => $position) {
+            $take('/\b' . $word . '\b/u', fn () => $position);
+        }
+
+        $take('/\b(?:number|no|#)\s*(\d{1,2})\b/u', fn ($m) => (int) $m[1][0]);
+        $take('/\b(\d{1,2})\s*(?:st|nd|rd|th)\b/u', fn ($m) => (int) $m[1][0]);
+        $take('/\b(?:last|final)\b/u', fn () => $count);
+        $take('/\bnext\b/u', fn () => 1);
+        // "the other one" means the one that is not being talked about.
+        $take('/\bother\b/u', fn () => $discussed === 1 ? min(2, $count) : 1);
+
+        return $found;
+    }
+
+    /**
+     * Answer a follow-up question about the appointments already listed.
+     *
+     * Every word of the answer comes from the PureMed rows in state. Returns
+     * null when the message is not a question about them, so booking and
+     * cancelling carry on working as before.
+     */
+    private function answerAppointmentQuestion(array &$state, string $text): ?array
+    {
+        $appointments = array_values($state['appointments_context'] ?? []);
+        $count = count($appointments);
+
+        if (!$count) {
+            return null;
+        }
+
+        $position = $this->appointmentReference($text, $count, (int) ($state['discussed_appointment'] ?? 0));
+
+        if ($position === null) {
+            return null;
+        }
+
+        if ($position > $count) {
+            return [$this->say('You only have ' . $count . ' upcoming '
+                . ($count === 1 ? 'appointment' : 'appointments') . '.')];
+        }
+
+        $appointment = $appointments[$position - 1];
+        $state['discussed_appointment'] = $position;
+
+        $names = [1 => 'first', 2 => 'second', 3 => 'third', 4 => 'fourth', 5 => 'fifth'];
+        $which = $count === 1 ? 'Your appointment' : ('Your ' . ($names[$position] ?? ('number ' . $position)) . ' appointment');
+
+        $type = trim((string) ($appointment['appointment_type_name'] ?? ''));
+
+        return [$this->say($which . ' is on ' . $this->appointmentLabel($appointment)
+            . ' with ' . $this->doctorDisplay(['first_name' => $appointment['doctor_name'] ?? ''])
+            . ($type !== '' ? ', for ' . $type : '') . '.')];
+    }
+
+    /**
+     * A question ABOUT existing appointments, rather than a request to make one.
+     *
+     * This has to be generous, because wantsBooking() matches the bare word
+     * "appointment" and is checked straight after: anything not caught here is
+     * treated as a new booking. "How many appointments do I have?" used to fall
+     * through and open the doctor list.
+     */
     private function wantsAppointmentList(string $text): bool
     {
         $value = $this->normalizeText($text);
 
-        return $value !== '' && preg_match(
-            '/\b(my appointments|my bookings|show me my appointments|list my appointments|what appointments|which appointments|do i have any appointments|upcoming appointments|all my appointments)\b/',
+        if ($value === '') {
+            return false;
+        }
+
+        // "how many appointments do I have", "how many appointments I have"
+        if (preg_match('/\bhow many\b[^.]{0,20}\bappointments?\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "when is my next appointment (with the doctor)?", "my next appointment"
+        if (preg_match('/\bnext appointment\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "can you check my appointments", "tell me my appointments"
+        if (preg_match('/\b(check|tell me|see|view|show)\b[^.]{0,16}\bmy (appointments?|bookings?)\b/u', $value) === 1) {
+            return true;
+        }
+
+        return preg_match(
+            '/\b(my appointments|my bookings|show me my appointments|list my appointments|what appointments'
+            . '|which appointments|do i have any appointments|upcoming appointments|all my appointments'
+            . '|any appointments)\b/u',
             $value
         ) === 1;
     }
@@ -2658,14 +2961,41 @@ class ChatController extends Controller
     {
         $value = mb_strtolower(trim($text));
 
-        return $value !== '' && preg_match('/\b(book|booking|appointment|appointments|termin|schedule|see a doctor|make an appointment)\b/', $value) === 1;
+        // "see Dr Gunnar" is a request to be seen, and so is "see a doctor".
+        // "which doctor should I see?" is a question and deliberately misses,
+        // because "see" is not followed by a doctor there.
+        return $value !== '' && preg_match(
+            '/\b(book|booking|appointment|appointments|termin|schedule|make an appointment)\b|\bsee (?:a |the |dr |doctor)/',
+            $value
+        ) === 1;
     }
 
+    /**
+     * A request to see more of the list, not a choice from it.
+     *
+     * Worth being generous here: "show me more appointment types" used to fall
+     * through to the matcher, which found a type actually named "swati app
+     * type" in the words "appointment type" and selected it.
+     */
     private function wantsMore(string $text): bool
     {
         $value = $this->normalizeText($text);
 
-        return $value !== '' && preg_match('/\b(show more|more options|more times|see more|other options|anything else available)\b/', $value) === 1;
+        if ($value === '') {
+            return false;
+        }
+
+        // "show me more...", "can I see more...", "do you have more..."
+        if (preg_match('/\b(show|see|list|give|have|got)\b[^.]{0,16}\bmore\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "more appointment types", "more doctors", "more options please"
+        if (preg_match('/\bmore\b\s+(options|choices|types?|appointments?|doctors?|times?|slots?|days?|dates?)\b/u', $value) === 1) {
+            return true;
+        }
+
+        return preg_match('/\b(show more|see more|what else|anything else available|other options|further options)\b/u', $value) === 1;
     }
 
     private function wantsCancel(string $text): bool
@@ -2709,6 +3039,30 @@ class ChatController extends Controller
     /**
      * Asking for a different day, rather than a different time on the same day.
      */
+    /**
+     * "Can I change the time for this appointment?" asked about a booking that
+     * has already been made.
+     *
+     * Deliberately requires a word about changing AND a word about what is being
+     * changed, so that "book another appointment" - which also mentions an
+     * appointment - is left to the new-booking path.
+     */
+    private function wantsReschedule(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        if (preg_match('/\b(reschedule|rebook|re book)\b/u', $value) === 1) {
+            return true;
+        }
+
+        return preg_match('/\b(change|move|shift|swap|switch|amend|edit)\b/u', $value) === 1
+            && preg_match('/\b(time|slot|appointment|booking|day|date)\b/u', $value) === 1;
+    }
+
     /**
      * "I don't want 13 August" names a day in order to refuse it.
      *
@@ -3359,7 +3713,18 @@ class ChatController extends Controller
             'appointment' => null,
             'cancellable' => [],
             'cancel_target' => null,
+            // Set only while a "change the time" request is in flight: the
+            // cancellation is confirmed first, then a new time is chosen.
+            'rebook_after_cancel' => false,
             'appointment_list' => [],
+            // The appointments just listed, kept so follow-up questions - "when
+            // is the second one?" - are answered from the real PureMed data
+            // rather than asked for again. Cleared when the patient moves on to
+            // booking or cancelling, or starts a new session.
+            'appointments_context' => [],
+            // Which of them was last talked about, so "the other one" has
+            // something to be relative to.
+            'discussed_appointment' => 0,
             'slot_hint' => null,
             'slot_window' => null,
             'last_assistant' => null,
