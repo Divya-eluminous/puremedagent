@@ -9,6 +9,7 @@ use App\Services\AiAssistant\PureMedApiClient;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -45,6 +46,15 @@ class ChatController extends Controller
 
     /** Chip value that reveals the next page of choices. */
     private const MORE = '__more__';
+
+    /**
+     * Shortest and longest run of digits accepted as a mobile number.
+     *
+     * The register API itself sets no length rule, so these are the assistant's
+     * own: four digits or fewer is a mis-heard fragment, not a phone number.
+     */
+    private const MOBILE_MIN_DIGITS = 5;
+    private const MOBILE_MAX_DIGITS = 15;
 
     /**
      * Words that mean the answer is a request or a pleasantry rather than a
@@ -123,6 +133,15 @@ class ChatController extends Controller
             // before the assistant asks for anything.
             if ($state['step'] === 'intent' && empty($state['patient'])) {
                 $replies[] = $this->say("Hi, I'm your PureMed Assistant.");
+            } elseif ($state['step'] === 'closed') {
+                // The last conversation was closed politely, so there is
+                // nothing to pick up. That step has no question of its own -
+                // resuming into it left the patient looking at a greeting with
+                // no way forward. Land somewhere that offers them one instead.
+                $state['step'] = $state['patient_id'] ? 'appointments' : 'intent';
+                $name = $state['patient']['first_name'] ?? null;
+
+                $replies[] = $this->say($name ? 'Welcome back, ' . $name . '.' : 'Welcome back.');
             } else {
                 $replies[] = $this->say("Welcome back. Let's pick up where we left off.");
             }
@@ -384,6 +403,16 @@ class ChatController extends Controller
             return [];
         }
 
+        // "Are there more doctors?" is a question about who the practice has,
+        // and deserves a real answer. Checked before the "show more" hatch
+        // below, which would silently redraw the same chips and say "here are
+        // a few more" when there are none.
+        if ($choiceValue === '' && $state['step'] === 'doctor' && $this->asksForOtherDoctors($text)) {
+            $state['_handled'] = true;
+
+            return $this->answerOtherDoctors($state, $client);
+        }
+
         // "Show more" just reveals the next page of chips for the same question.
         if ($choiceValue === self::MORE || $this->wantsMore($text)) {
             $state['chip_page'] = ($state['chip_page'] ?? 0) + 1;
@@ -471,6 +500,35 @@ class ChatController extends Controller
             if ($this->wantsCancel($text)) {
                 return $this->loadCancellableAppointments($state, $client);
             }
+        }
+
+        // Changing their mind about booking at all. Without this it reached the
+        // step's own matcher, which could only answer "I didn't catch that one"
+        // and ask the same question again, however many times they said it.
+        if ($choiceValue === ''
+            && !in_array($state['step'], ['done', 'cancelled', 'closed', 'appointments',
+                'cancel_select', 'cancel_confirm'], true)
+            && $this->abandonsBooking($text)) {
+            $state = array_merge($state, [
+                'goal' => 'book',
+                'doctor' => null,
+                'appointment_types' => [],
+                'appointment_type' => null,
+                'slots' => [],
+                'slot_date' => null,
+                'slot_window' => null,
+                'slot' => null,
+                'slot_hint' => null,
+                // Who they are is kept: they may well want something else.
+                'step' => $state['patient_id'] ? 'appointments' : 'intent',
+                '_handled' => true,
+            ]);
+
+            $name = $state['patient']['first_name'] ?? null;
+
+            return [$this->say($name
+                ? "No problem " . $name . " - I won't book anything."
+                : "No problem - I won't book anything.")];
         }
 
         // Global escape hatches. Without these a doctor with no free slots
@@ -565,7 +623,7 @@ class ChatController extends Controller
             case 'mobile_no':
                 $mobile = $this->cleanMobile($text);
                 if (!$mobile) {
-                    return [$this->say("That doesn't look like a phone number I can use. Could you give me your mobile number again, digits only?")];
+                    return [$this->say("That doesn't look like a valid mobile number. Please enter your mobile number again, digits only.")];
                 }
                 $state['patient']['mobile_no'] = $mobile;
                 $state['step'] = 'birth_date';
@@ -662,6 +720,9 @@ class ChatController extends Controller
                 return $this->registerAndLoadDoctors($state, $client, $authenticator);
 
             case 'doctor':
+                // Questions about who else is available are answered further
+                // up, before the "show more" hatch.
+
                 // "the earliest one" is about time, not about which doctor.
                 // Remember it for the slot step instead of letting it pick.
                 if ($choiceValue === '' && $this->isOnlyTimePreference($text)) {
@@ -821,6 +882,16 @@ class ChatController extends Controller
                     return $this->showSlotList($state, $text);
                 }
 
+                // "book for 11" is not a position in the list. If 11:00 is not
+                // free, the honest answer is to ask - counting down to whatever
+                // sits eleventh would book a time nobody named. Handled here so
+                // the LLM is never asked to turn a number into a position.
+                if ($choiceValue === '' && ($ask = $this->clarifyAmbiguousNumber($state, $text))) {
+                    $state['_handled'] = true;
+
+                    return [$this->say($ask)];
+                }
+
                 $slot = $this->matchSlot($state['slots'], $state['slot_date'], $choiceValue, $text, $state['slot_window'] ?? null);
                 if (!$slot) {
                     return [$this->say("I didn't catch that time. Please pick one of the times shown.")];
@@ -840,16 +911,30 @@ class ChatController extends Controller
                 // what to do instead. Backing out to the day list would throw
                 // the day away and make the patient say it a second time.
                 if ($choiceValue === '' && !$this->saidYes($choiceValue, $text)) {
-                    $date = $this->matchSlotDate($state['slots'], '', $text);
+                    // "the 11th one" is a position in the list, not the 11th of
+                    // the month. Without this the day matcher claimed it first
+                    // and quietly moved the appointment to another date.
+                    $positional = $this->saysPosition($text);
+                    $date = $positional ? null : $this->matchSlotDate($state['slots'], '', $text);
                     $target = $date ?: $state['slot_date'];
 
                     // A stated time is taken first, so "book 13 August at 9:00"
                     // works whether or not the day itself changed. Only a time
                     // the patient actually said counts - see the day step.
                     $spokenTime = $this->extractTime($text) !== '';
-                    $slot = $target && $spokenTime
+                    $slot = $target && ($spokenTime || $positional)
                         ? $this->matchSlot($state['slots'], $target, '', $text)
                         : null;
+
+                    // "you have taken wrong time I said 17" names the hour in
+                    // the middle of a correction. Only the hour is looked up -
+                    // a number here is never counted into the list.
+                    $hour = $this->singleNumberIn($text);
+
+                    if (!$slot && $target && $hour !== null) {
+                        $slot = $this->matchSlotByHour($this->slotsOn($state['slots'], $target), 'at ' . $hour);
+                        $spokenTime = $spokenTime || $slot !== null;
+                    }
 
                     if ($slot && $slot !== $state['slot']) {
                         $state['slot_date'] = $target;
@@ -963,6 +1048,13 @@ class ChatController extends Controller
                     return $this->closeConversation($state);
                 }
 
+                if ($choiceValue === '' && !empty($state['last_cancelled'])
+                    && $this->wantsSameAgain($text)) {
+                    $state['_handled'] = true;
+
+                    return $this->offerSameAgain($state, $client);
+                }
+
                 // Follow-up questions about the list are answered further up,
                 // before the appointment-list and booking hatches.
                 if ($choiceValue === 'book' || $this->wantsBooking($text)) {
@@ -978,6 +1070,16 @@ class ChatController extends Controller
                 // the same menu was repeated at every further message.
                 if ($choiceValue === '' && $this->saidNothingElse($text)) {
                     return $this->closeConversation($state);
+                }
+
+                // "Book the same one again" - checked before the general
+                // booking hatch, which would start from the doctor list and
+                // ask for everything the assistant already knows.
+                if ($choiceValue === '' && !empty($state['last_cancelled'])
+                    && $this->wantsSameAgain($text)) {
+                    $state['_handled'] = true;
+
+                    return $this->offerSameAgain($state, $client);
                 }
 
                 if ($this->wantsBooking($text)) {
@@ -1384,6 +1486,68 @@ class ChatController extends Controller
      * Slots are validated twice: once when the list is built, and again here in
      * case somebody booked the same time while the patient was choosing.
      */
+    /**
+     * Refuse to book anything that is not exactly what is on screen right now.
+     *
+     * Checked immediately before the booking call, and deliberately not earlier:
+     * the slot list is re-fetched when the patient picks a time, but minutes can
+     * pass between that and their "yes". Everything here is compared against
+     * PureMed's own current availability - never against a remembered list, and
+     * never against anything the language model returned.
+     *
+     * @return array<int, array>|null  the reply to send instead of booking
+     */
+    private function refuseUnsafeBooking(array &$state, PureMedApiClient $client): ?array
+    {
+        $slot = $state['slot'] ?? null;
+        $doctorId = $state['doctor']['id'] ?? null;
+        $typeId = $state['appointment_type']['id'] ?? null;
+
+        // Nothing chosen, or chosen only in part. Sending this would let PureMed
+        // decide what the patient meant.
+        if (!is_array($slot) || !$doctorId || !$typeId
+            || empty($slot['slot_date']) || empty($slot['time']) || !isset($slot['time_slot_id'])) {
+            $state['slot'] = null;
+            $state['step'] = $state['doctor'] ? 'appointment_type' : 'doctor';
+
+            return [$this->say("Let's start that again - I want to be sure I book the right appointment.", 'error')];
+        }
+
+        // The day on the confirmation card and the day of the slot must agree.
+        // If they ever disagree, an older selection has survived a change the
+        // patient made, and the safe answer is to ask rather than guess.
+        if (!empty($state['slot_date']) && $slot['slot_date'] !== $state['slot_date']) {
+            Log::warning('AI assistant: booking refused, slot did not match the chosen day', [
+                'slot_date' => $slot['slot_date'],
+                'state_date' => $state['slot_date'],
+            ]);
+
+            $state['slot'] = null;
+            $state['step'] = 'slot_date';
+
+            return [$this->say("I want to be sure of the day before I book. Which of these works for you?", 'error')];
+        }
+
+        // PureMed's current availability for THIS doctor and THIS appointment
+        // type. The slot must still be in it, matched on the key built from the
+        // API's own fields - so a slot that was never offered cannot be booked.
+        $fresh = $this->fetchSlots($state, $client);
+        $stillFree = collect($fresh)->firstWhere('slot_key', $slot['slot_key'] ?? null);
+
+        if (!$stillFree) {
+            $state['slots'] = $fresh;
+            $state['slot'] = null;
+            $state['step'] = empty($fresh) ? 'appointment_type' : 'slot_date';
+
+            return [$this->say("I'm sorry - that time was taken while we were talking. Could you pick another one?", 'error')];
+        }
+
+        // Book the row PureMed just gave us, not the copy held in the session.
+        $state['slot'] = $stillFree;
+
+        return null;
+    }
+
     private function holdSlot(array &$state, array $slot, PureMedApiClient $client): array
     {
         $fresh = $this->fetchSlots($state, $client);
@@ -1406,6 +1570,11 @@ class ChatController extends Controller
 
     private function book(array &$state, PureMedApiClient $client): array
     {
+        // The last gate before the only irreversible step in the conversation.
+        if ($refusal = $this->refuseUnsafeBooking($state, $client)) {
+            return $refusal;
+        }
+
         $slot = $state['slot'];
 
         $result = $client->bookAppointment($state['token'], [
@@ -1465,7 +1634,10 @@ class ChatController extends Controller
         ]);
 
         $appointments = $result['ok'] ? $this->keepFields((array) $result['data'], [
+            // doctor_id and appointment_type_id are what a rebooking needs:
+            // names cannot be sent to the booking API.
             'id', 'start_date', 'doctor_name', 'appointment_type_name',
+            'doctor_id', 'appointment_type_id',
         ]) : [];
 
         if (empty($appointments)) {
@@ -1496,7 +1668,10 @@ class ChatController extends Controller
         ]);
 
         $appointments = $result['ok'] ? $this->keepFields((array) $result['data'], [
+            // doctor_id and appointment_type_id are what a rebooking needs:
+            // names cannot be sent to the booking API.
             'id', 'start_date', 'doctor_name', 'appointment_type_name',
+            'doctor_id', 'appointment_type_id',
         ]) : [];
 
         $state['step'] = 'appointments';
@@ -1533,7 +1708,10 @@ class ChatController extends Controller
         ]);
 
         $past = $result['ok'] ? $this->keepFields((array) $result['data'], [
+            // doctor_id and appointment_type_id are what a rebooking needs:
+            // names cannot be sent to the booking API.
             'id', 'start_date', 'doctor_name', 'appointment_type_name',
+            'doctor_id', 'appointment_type_id',
         ]) : [];
 
         $state['step'] = 'appointments';
@@ -1810,6 +1988,18 @@ class ChatController extends Controller
         $state['cancel_target'] = null;
         $state['step'] = 'cancelled';
 
+        // Remember what was cancelled, so "book the same again" does not make
+        // the patient repeat four answers the assistant already has. Ids only -
+        // everything is revalidated against PureMed before anything is offered.
+        $state['last_cancelled'] = [
+            'doctor_id' => $target['doctor_id'] ?? null,
+            'doctor_name' => $target['doctor_name'] ?? null,
+            'appointment_type_id' => $target['appointment_type_id'] ?? null,
+            'appointment_type_name' => $target['appointment_type_name'] ?? null,
+            'date' => $this->appointmentDay($target),
+            'time' => $this->appointmentClock($target),
+        ];
+
         // Changing the time is a cancellation followed by a booking, because
         // PureMed has no way to move an appointment. The cancellation has now
         // really happened, so say so plainly before going on - the patient must
@@ -2012,6 +2202,33 @@ class ChatController extends Controller
     }
 
     /** get-appointment returns start_date as Y-m-d H:i:s. */
+    /** The day of an appointment as PureMed writes days: 11.08.2026. */
+    private function appointmentDay(array $appointment): ?string
+    {
+        if (!empty($appointment['date'])) {
+            return $appointment['date'];
+        }
+
+        try {
+            return Carbon::parse($appointment['start_date'])->format('d.m.Y');
+        } catch (\Throwable $exception) {
+            return null;
+        }
+    }
+
+    private function appointmentClock(array $appointment): ?string
+    {
+        if (!empty($appointment['time'])) {
+            return $appointment['time'];
+        }
+
+        try {
+            return Carbon::parse($appointment['start_date'])->format('H:i');
+        } catch (\Throwable $exception) {
+            return null;
+        }
+    }
+
     private function appointmentLabel(array $appointment): string
     {
         // Two shapes reach here: one listed by PureMed for cancelling, which
@@ -2466,6 +2683,361 @@ class ChatController extends Controller
      *
      * @param  array<int, array>  $slots
      */
+    /**
+     * The question to ask when a number could be a time or a position.
+     *
+     * Answering "which time suits?" with a number almost always means the hour,
+     * so when that hour is free the existing matcher takes it and this returns
+     * nothing. The dangerous case is the hour NOT being free: the number then
+     * falls through to the positional matcher, which happily counts down the
+     * list and picks something the patient never said. That is what turned
+     * "book for 11" into 15:40.
+     *
+     * Explicit wording is left alone: "the 11th one", "number 11", "11 o'clock"
+     * and "11:00" all say plainly which is meant.
+     */
+    private function clarifyAmbiguousNumber(array $state, string $text): ?string
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return null;
+        }
+
+        // Said as a position - the existing matcher resolves it.
+        if ($this->saysPosition($text)) {
+            return null;
+        }
+
+        // Said unmistakably as a time. Never offered a position below - if the
+        // hour is not free the patient is told so, not counted into the list.
+        $saidAsTime = preg_match('/\d{1,2}\s*[:.]\s*\d{2}/u', $text) === 1
+            || preg_match('/\b(?:am|pm|o clock|oclock|uhr)\b/u', $value) === 1;
+
+        $number = $this->singleNumberIn($text);
+
+        if ($number === null) {
+            return null;
+        }
+
+        $onDate = $this->slotsOn($state['slots'] ?? [], $state['slot_date'] ?? null);
+
+        if (!$onDate || $number < 1) {
+            return null;
+        }
+
+        // The hour is free, so it is a time and the matcher will find it.
+        if ($this->matchSlotByHour($onDate, 'at ' . $number)) {
+            return null;
+        }
+
+        $clock = sprintf('%02d:00', $number > 23 ? 0 : $number);
+
+        // The hour is not free, but that many times exist - genuinely ambiguous,
+        // unless they said it in a way that can only be a time.
+        if (!$saidAsTime && $number <= count($onDate)) {
+            return 'I don\'t have ' . $clock . ' free on ' . $state['slot_date']
+                . '. Did you mean the ' . $this->ordinalName($number) . ' time in the list, or a different time?';
+        }
+
+        return 'I don\'t have ' . $clock . ' free on ' . $state['slot_date'] . '. Here are the times I do have.';
+    }
+
+    /**
+     * The one small number in a message, or null.
+     *
+     * Null when there is none, more than one, or when it is written as a
+     * position ("the 11th one") - those the positional matcher owns.
+     */
+    private function singleNumberIn(string $text): ?int
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '' || $this->saysPosition($text)) {
+            return null;
+        }
+
+        if (preg_match_all('/(?<!\d)(\d{1,2})(?!\d)/u', $value, $matches) !== 1) {
+            return null;
+        }
+
+        $number = (int) $matches[1][0];
+
+        return $number >= 1 && $number <= 23 ? $number : null;
+    }
+
+    /**
+     * "Do you have any other doctors?" - a question about the list, not a
+     * choice from it.
+     *
+     * Only consulted at the doctor question. Later in the booking the same
+     * words mean "change the doctor I picked", which the escape hatch handles.
+     */
+    private function asksForOtherDoctors(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        $who = '(doctors?|drs?|physicians?|gps?|specialists?|someone|somebody|anyone|anybody)';
+
+        // "do you have any other doctors", "are there more doctors",
+        // "what other doctors do you have", "is there anyone else"
+        if (preg_match('/\b(do you have|have you got|are there|is there|what other|which other|any other|anything else)\b[^.?]{0,32}\b' . $who . '\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "anyone else available", "someone else", "another doctor available"
+        return preg_match('/\b' . $who . '\b[^.?]{0,24}\b(else|available|other than|besides|apart from)\b/u', $value) === 1
+            || preg_match('/\b(anyone|anybody|someone|somebody)\s+else\b/u', $value) === 1
+            || preg_match('/\b(can i|could i|may i)\b[^.?]{0,16}\b(choose|pick|see|have)\b[^.?]{0,16}\b(another|other|different)\b[^.?]{0,8}\b' . $who . '\b/u', $value) === 1;
+    }
+
+    /**
+     * Answer that question from the practice's real list.
+     *
+     * The list is read again from PureMed rather than from the session, so the
+     * answer is about what is actually on offer. No doctor is ever named that
+     * PureMed did not return, and nothing else about the booking is touched.
+     */
+    private function answerOtherDoctors(array &$state, PureMedApiClient $client): array
+    {
+        $fresh = $client->getDoctors($state['token']);
+
+        if ($fresh['ok'] && !empty($fresh['data'])) {
+            $state['doctors'] = $this->keepFields((array) $fresh['data'],
+                ['id', 'first_name', 'last_name', 'doctor_speciality']);
+        }
+
+        $all = $state['doctors'] ?? [];
+
+        if (!$all) {
+            return [$this->say("I can't see the doctor list just now. Please try again in a moment.", 'error')];
+        }
+
+        $perPage = (int) config('ai-assistant.chips_per_page', 6);
+        $page = (int) ($state['chip_page'] ?? 0);
+        $shown = min(count($all), $perPage * ($page + 1));
+
+        // There are more than the patient can currently see.
+        if (count($all) > $shown) {
+            $state['chip_page'] = $page + 1;
+            $state['_no_prompt'] = true;
+
+            return [$this->say('Yes - here are the others I have.')];
+        }
+
+        $state['_no_prompt'] = true;
+
+        return [$this->say('Currently, I only have ' . $this->doctorNameList($all)
+            . ' available. Would you like to choose one of them?')];
+    }
+
+    /** "Dr Gunnar Gauff and Dr Albert Munnar", from the real records. */
+    private function doctorNameList(array $doctors): string
+    {
+        $names = array_values(array_filter(array_map(
+            fn ($doctor) => $this->doctorName($doctor) === '' ? null : $this->doctorDisplay($doctor),
+            $doctors
+        )));
+
+        if (count($names) <= 1) {
+            return $names[0] ?? 'no doctors';
+        }
+
+        $last = array_pop($names);
+
+        return implode(', ', $names) . ' and ' . $last;
+    }
+
+    /**
+     * "Can you book the same appointment again?"
+     *
+     * Only meaningful right after a cancellation, which is where it is checked.
+     */
+    private function wantsSameAgain(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        if (preg_match('/\b(rebook|re book)\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "the same appointment", "the same one", "same date and time"
+        if (preg_match('/\bsame\b[^.]{0,20}\b(appointment|one|time|slot|date|day|doctor)\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "book it again", "book that again"
+        return preg_match('/\b(book|booking)\b[^.]{0,16}\bagain\b/u', $value) === 1
+            || preg_match('/\bagain\b[^.]{0,16}\b(same|that one|it)\b/u', $value) === 1;
+    }
+
+    /**
+     * Offer the appointment that was just cancelled, if it is still bookable.
+     *
+     * Nothing here books anything. The doctor, the appointment type and the
+     * time are each looked up again through the same PureMed calls the normal
+     * flow uses, and the patient is taken to the ordinary confirmation step -
+     * so the existing checks before booking still apply in full.
+     */
+    private function offerSameAgain(array &$state, PureMedApiClient $client): array
+    {
+        $previous = $state['last_cancelled'] ?? null;
+
+        if (!is_array($previous) || empty($previous['doctor_id']) || empty($previous['appointment_type_id'])) {
+            return [$this->say("I don't have the details of that one to hand. Let's book it fresh - which doctor would you like to see?")];
+        }
+
+        // The doctor must still be one the practice offers.
+        $doctors = $client->getDoctors($state['token']);
+        $doctor = collect($doctors['ok'] ? (array) $doctors['data'] : [])
+            ->firstWhere('id', $previous['doctor_id']);
+
+        if (!$doctor) {
+            $state['step'] = 'doctor';
+
+            return [$this->say(($previous['doctor_name'] ? Str::title($previous['doctor_name']) : 'That doctor')
+                . ' is not available for booking any more. Which doctor would you like to see?', 'error')];
+        }
+
+        $state['doctors'] = $this->keepFields((array) $doctors['data'], ['id', 'first_name', 'last_name', 'doctor_speciality']);
+        $state['doctor'] = collect($state['doctors'])->firstWhere('id', $previous['doctor_id']);
+
+        // The appointment type must still exist for that doctor.
+        $types = $client->getAppointmentTypes($state['token'], ['doctor_id' => $previous['doctor_id']]);
+        $type = collect($types['ok'] ? (array) $types['data'] : [])
+            ->firstWhere('id', $previous['appointment_type_id']);
+
+        if (!$type) {
+            $state['appointment_types'] = $this->keepFields((array) ($types['data'] ?? []), ['id', 'name', 'duration', 'description']);
+            $state['step'] = 'appointment_type';
+
+            return [$this->say(($previous['appointment_type_name'] ?: 'That appointment type')
+                . ' is not offered any more. What do you need the appointment for?', 'error')];
+        }
+
+        $state['appointment_types'] = $this->keepFields((array) $types['data'], ['id', 'name', 'duration', 'description']);
+        $state['appointment_type'] = collect($state['appointment_types'])->firstWhere('id', $previous['appointment_type_id']);
+
+        // And the time must still be free.
+        $state['slots'] = $this->fetchSlots($state, $client);
+        $state['slot'] = null;
+        $state['slot_window'] = null;
+
+        if (empty($state['slots'])) {
+            $state['slot_date'] = null;
+            $state['step'] = 'appointment_type';
+
+            return [$this->say("I couldn't find any free times for that appointment any more. You could try a different appointment type, or another doctor.", 'error')];
+        }
+
+        $slot = collect($state['slots'])
+            ->firstWhere(fn ($candidate) => $candidate['slot_date'] === $previous['date']
+                && $candidate['time'] === $previous['time']);
+
+        if ($slot) {
+            $state['slot_date'] = $slot['slot_date'];
+            $state['slot'] = $slot;
+            $state['step'] = 'confirm';
+            $state['last_cancelled'] = null;
+
+            // The confirmation card and its Yes/No follow from the step itself.
+            return [$this->say('Sure - I still have those details.')];
+        }
+
+        // The exact time has gone. Offer that day if it still has anything,
+        // otherwise the days that are left.
+        $sameDay = $this->slotsOn($state['slots'], $previous['date']);
+        $state['last_cancelled'] = null;
+
+        if ($sameDay) {
+            $state['slot_date'] = $previous['date'];
+            $state['step'] = 'slot_time';
+            $state['_no_prompt'] = true;
+
+            return [$this->say($previous['time'] . ' on ' . $previous['date']
+                . ' has been taken since. Here is what I still have that day - which one suits?')];
+        }
+
+        $state['slot_date'] = null;
+        $state['step'] = 'slot_date';
+        $state['_no_prompt'] = true;
+
+        return [$this->say('I no longer have anything free on ' . $previous['date']
+            . '. Which of these days would suit instead?')];
+    }
+
+    /**
+     * "I don't want to book my appointment" - a change of mind about the whole
+     * booking, rather than about one of the answers in it.
+     *
+     * Naming a day, a time or a position makes it a change of CHOICE, and those
+     * are handled by the step they belong to: "I don't want this time" asks for
+     * another time, "I don't want 13 August" asks for another day.
+     */
+    private function abandonsBooking(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '' || $this->mentionsSpecificDay($text)
+            || $this->extractTime($text) !== '' || $this->saysPosition($text)) {
+            return false;
+        }
+
+        if (preg_match('/\b(never mind|nevermind|forget it|forget about it|leave it|not interested'
+            . '|changed my mind|change my mind)\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "don't want to book", "I do not want to book anything", "no booking"
+        return preg_match('/\b(dont|do not|don t|not|no)\b[^.]{0,24}\b(book|booking)\b/u', $value) === 1
+            || preg_match('/\b(dont|do not|don t)\b[^.]{0,16}\bwant\b[^.]{0,12}\b(an|any)\s+appointment\b/u', $value) === 1;
+    }
+
+    /**
+     * Whether the number in a message is a position in the list rather than a
+     * time or a day: "the 11th one", "number 11", "option 11".
+     */
+    private function saysPosition(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        return $value !== '' && (
+            preg_match('/\b\d{1,2}\s*(?:st|nd|rd|th)\b/u', $value) === 1
+            || preg_match('/\b(?:number|option|no|#)\s*\d{1,2}\b/u', $value) === 1
+            || preg_match('/\b(?:the\s+)?\d{1,2}\s+(?:one|slot|option)\b/u', $value) === 1
+        );
+    }
+
+    /** @return array<int, array> */
+    private function slotsOn(array $slots, ?string $date): array
+    {
+        return array_values(array_filter($slots, fn ($slot) => ($slot['slot_date'] ?? null) === $date));
+    }
+
+    private function ordinalName(int $position): string
+    {
+        $names = [1 => 'first', 2 => 'second', 3 => 'third', 4 => 'fourth', 5 => 'fifth',
+            6 => 'sixth', 7 => 'seventh', 8 => 'eighth', 9 => 'ninth', 10 => 'tenth'];
+
+        if (isset($names[$position])) {
+            return $names[$position];
+        }
+
+        $suffix = ($position % 100 >= 11 && $position % 100 <= 13)
+            ? 'th'
+            : ([1 => 'st', 2 => 'nd', 3 => 'rd'][$position % 10] ?? 'th');
+
+        return $position . $suffix;
+    }
+
     private function matchSlotByHour(array $slots, string $text, bool $allowBareNumber = false): ?array
     {
         $value = $this->normalizeText($text);
@@ -2927,8 +3499,21 @@ class ChatController extends Controller
             return false;
         }
 
+        // Booking and cancelling own their own words. This matters because the
+        // caller checks this before wantsCancel(), so without it "cancel my
+        // appointment" would be answered with a list instead.
+        if (preg_match('/\b(book|cancel|reschedule|rebook)\b/u', $value) === 1) {
+            return false;
+        }
+
         // "how many appointments do I have", "how many appointments I have"
         if (preg_match('/\bhow many\b[^.]{0,20}\bappointments?\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "my appointments", and the same with a word in between: "my total
+        // appointments", "my all appointments", "my remaining appointments".
+        if (preg_match('/\bmy\b[^.]{0,24}\bappointments?\b/u', $value) === 1) {
             return true;
         }
 
@@ -3216,11 +3801,27 @@ class ChatController extends Controller
      * stripped). Speech recognition often adds spaces, so strip everything
      * that is not a digit.
      */
+    /**
+     * The mobile number, or null when it is not one.
+     *
+     * The rule is the practice's own, copied from the register API validator
+     * ('mobile_no' => 'required|regex:/^(?!0{2})0?[0-9]+$/|numeric'): digits
+     * only, and not starting with a double zero. That validator sets no minimum
+     * length, so the short-value check below is the assistant's own guard
+     * against a mis-heard fragment being accepted as a phone number.
+     */
     private function cleanMobile(string $value): ?string
     {
-        $digits = preg_replace('/\D+/', '', $value);
+        // Dictated numbers arrive as words: "one two one two one two".
+        $digits = preg_replace('/\D+/', '', $this->wordsToNumbers(mb_strtolower(trim($value))));
 
-        if (strlen($digits) < 6 || strlen($digits) > 15) {
+        if (strlen($digits) < self::MOBILE_MIN_DIGITS || strlen($digits) > self::MOBILE_MAX_DIGITS) {
+            return null;
+        }
+
+        // The register API's own rule, applied here so the patient hears about
+        // it now rather than after answering three more questions.
+        if (preg_match('/^(?!0{2})0?[0-9]+$/', $digits) !== 1) {
             return null;
         }
 
@@ -3237,23 +3838,43 @@ class ChatController extends Controller
     {
         $value = mb_strtolower(trim($value));
 
+        // Spelled out letter by letter - "y o p m a i l dot com" - which is
+        // exactly what people do once the engine has misheard the domain twice.
+        // Each letter comes back as its own word; without joining them the
+        // address is either rejected outright or, worse, silently reduced to
+        // its last letter ("p r i t i" became "i").
+        $value = preg_replace_callback(
+            '/(?<![a-z0-9])(?:[a-z]\s+){1,}[a-z](?![a-z0-9])/u',
+            static fn (array $m): string => preg_replace('/\s+/', '', $m[0]),
+            $value
+        );
+
+        // Longest first: str_replace works through these in order, so
+        // "at the rate of" must be spent before "at the" or "at".
         $spoken = [
             ' at the rate of ' => '@',
             ' at the rate ' => '@',
+            ' at rate of ' => '@',
+            ' at rate ' => '@',
             ' at sign ' => '@',
             ' at symbol ' => '@',
+            ' at the ' => '@',
             ' underscore ' => '_',
             ' hyphen ' => '-',
             ' dash ' => '-',
             ' dot ' => '.',
+            ' period ' => '.',
+            ' full stop ' => '.',
             ' at ' => '@',
         ];
 
         // Providers are often transcribed as two words ("g mail", "hot mail").
+        // This is speech repair only - any valid domain still passes below.
         $providers = [
             ' g mail' => ' gmail', ' gee mail' => ' gmail', ' google mail' => ' gmail',
-            ' hot mail' => ' hotmail', ' out look' => ' outlook',
-            ' yop mail' => ' yopmail', ' yahoo mail' => ' yahoo',
+            ' hot mail' => ' hotmail', ' out look' => ' outlook', ' outlook mail' => ' outlook',
+            ' yop mail' => ' yopmail', ' yahoo mail' => ' yahoo', ' ya hoo' => ' yahoo',
+            ' i cloud' => ' icloud', ' eye cloud' => ' icloud',
         ];
 
         $value = str_replace(array_keys($providers), array_values($providers), ' ' . $value . ' ');
@@ -3448,27 +4069,96 @@ class ChatController extends Controller
             return null;
         }
 
-        $formats = ['d.m.Y', 'j.n.Y', 'd/m/Y', 'j/n/Y', 'd-m-Y', 'Y-m-d', 'Y/m/d', 'j F Y', 'j M Y', 'F j Y', 'M j Y'];
+        $formats = ['d.m.Y', 'j.n.Y', 'd/m/Y', 'j/n/Y', 'd-m-Y', 'j-n-Y', 'Y-m-d', 'Y/m/d',
+            'j F Y', 'j M Y', 'F j Y', 'M j Y'];
 
-        foreach ($formats as $format) {
+        // People answer in sentences: "my birth date is 1 January 1992". Each
+        // candidate is the date lifted out of that, so the same formats and the
+        // same plausibility check below decide, exactly as before.
+        foreach ($this->birthDateCandidates($value) as $candidate) {
+            foreach ($formats as $format) {
+                try {
+                    $date = Carbon::createFromFormat('!' . $format, $candidate);
+                } catch (\Throwable $exception) {
+                    continue;
+                }
+
+                if ($date && !$this->overflowed() && $this->isPlausibleBirthDate($date)) {
+                    return $date;
+                }
+            }
+        }
+
+        // Last resort, and only on a candidate rather than the whole sentence:
+        // Carbon happily reads a stray number out of surrounding words.
+        foreach ($this->birthDateCandidates($value) as $candidate) {
             try {
-                $date = Carbon::createFromFormat('!' . $format, $value);
+                $date = Carbon::parse($candidate);
             } catch (\Throwable $exception) {
                 continue;
             }
 
-            if ($date && $this->isPlausibleBirthDate($date)) {
+            if ($date && !$this->overflowed() && $this->isPlausibleBirthDate($date)) {
                 return $date;
             }
         }
 
-        try {
-            $date = Carbon::parse($value);
-        } catch (\Throwable $exception) {
-            return null;
+        return null;
+    }
+
+    /**
+     * Whether the date just parsed was rolled over rather than read.
+     *
+     * PHP accepts "31 February" and quietly returns 2 March. A birth date the
+     * patient never gave is worse than asking them again, so an overflow is
+     * treated as no date at all.
+     */
+    private function overflowed(): bool
+    {
+        $errors = Carbon::getLastErrors();
+
+        return is_array($errors)
+            && (($errors['warning_count'] ?? 0) > 0 || ($errors['error_count'] ?? 0) > 0);
+    }
+
+    /**
+     * The date inside whatever the patient said, most specific first.
+     *
+     * Returns the whole answer as well, so a plain "27.03.1993" is unaffected.
+     *
+     * @return array<int, string>
+     */
+    private function birthDateCandidates(string $value): array
+    {
+        $tidy = function (string $candidate): string {
+            $candidate = str_replace(',', ' ', mb_strtolower($candidate));
+            // "1st January 1992" - the suffix is not part of any format.
+            $candidate = preg_replace('/\b(\d{1,2})(st|nd|rd|th)\b/u', '$1', $candidate);
+
+            return trim(preg_replace('/\s+/', ' ', $candidate));
+        };
+
+        $candidates = [];
+        $patterns = [
+            // 01.01.1992, 01/01/1992, 01-01-1992
+            '/\b\d{1,2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{2,4}\b/u',
+            // 1992-01-01
+            '/\b(?:18|19|20)\d{2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{1,2}\b/u',
+            // 1 January 1992, 1st Jan 1992
+            '/\b\d{1,2}(?:st|nd|rd|th)?\s+[a-z]+\.?\s+(?:18|19|20)\d{2}\b/iu',
+            // January 1, 1992
+            '/\b[a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*(?:18|19|20)\d{2}\b/iu',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $value, $matches) === 1) {
+                $candidates[] = $tidy(str_replace(['.', '/', '-'], ['.', '/', '-'], $matches[0]));
+            }
         }
 
-        return $this->isPlausibleBirthDate($date) ? $date : null;
+        $candidates[] = $tidy($value);
+
+        return array_values(array_unique(array_filter($candidates)));
     }
 
     private function isPlausibleBirthDate(Carbon $date): bool
@@ -3725,6 +4415,9 @@ class ChatController extends Controller
             // Which of them was last talked about, so "the other one" has
             // something to be relative to.
             'discussed_appointment' => 0,
+            // The appointment cancelled in this conversation, kept so it can be
+            // offered again without asking for the same four answers.
+            'last_cancelled' => null,
             'slot_hint' => null,
             'slot_window' => null,
             'last_assistant' => null,
