@@ -38,6 +38,19 @@ class PureMedApiClient
         return $this->post('appointment_types_endpoint', $payload, $this->bearer($token));
     }
 
+    /**
+     * The practice's bookable window for this doctor and appointment type.
+     *
+     * OptimalAppointmentController decides it from the practice's own settings -
+     * quarter rules, booking timeframe, and the type's optimal_appointment flag -
+     * and returns start_date, end_date, from_time and to_time. The same call the
+     * main app makes before it asks for slots.
+     */
+    public function getFromDate(string $token, array $payload = []): array
+    {
+        return $this->post('from_date_endpoint', $payload, $this->bearer($token));
+    }
+
     public function getDoctorSlots(string $token, array $payload = []): array
     {
         return $this->post('doctor_slots_endpoint', $payload, $this->bearer($token));

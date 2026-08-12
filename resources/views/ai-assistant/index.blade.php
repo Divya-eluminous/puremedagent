@@ -379,6 +379,9 @@
     var pendingStatus = null;
     // Set when the pending message came from the microphone rather than typing.
     var spokenSubmission = false;
+    // The question currently on screen, so speech can be handled differently
+    // while an email is being spelled out.
+    var currentStep = 'intent';
     var DEBUG = /[?&]pmdebug=1\b/.test(window.location.search);
 
     // The bubbles belonging to the newest typed or spoken turn, so a correction
@@ -790,13 +793,34 @@
         var messages = data.messages || [];
         var index = 0;
 
+        // Does this turn ask the patient to use the keyboard? If so the mic
+        // stays shut for it - but only for it.
+        var wantsKeyboard = false;
+        for (var scan = 0; scan < messages.length; scan++) {
+            if (messages[scan] && messages[scan].kind === 'focus') { wantsKeyboard = true; }
+        }
+
         function next() {
             if (index >= messages.length) {
                 renderOptions(data.options);
                 applyInput(data.input);
                 pendingStatus = data.pending || null;
                 setBusy(false);
+                // Which question is on screen now - the email steps are given
+                // more patience while the patient spells.
+                currentStep = data.step || currentStep;
                 offerEdit(data.can_edit);
+
+                // The keyboard was asked for on an earlier turn only. Now that
+                // the assistant has moved on to a different question, listening
+                // comes back on its own - the patient should not have to find
+                // the microphone button again for the rest of the visit.
+                if (handsFreeSuspended && !wantsKeyboard) {
+                    handsFreeSuspended = false;
+                    voiceOutput.enable();
+                    setHandsFree(true);
+                }
+
                 resumeListening(data);
                 return;
             }
@@ -812,6 +836,10 @@
             // The assistant has asked for the keyboard, so stop listening -
             // reopening the mic here would just mishear the same thing again.
             if (message.kind === 'focus') {
+                // Asking to hear it again would just mishear it the same way,
+                // so the mic closes - but remember it was open, because this
+                // applies to this one answer and not to the rest of the visit.
+                if (handsFree) { handsFreeSuspended = true; }
                 setHandsFree(false);
                 window.setTimeout(function () { input.focus(); }, 50);
             }
@@ -878,6 +906,17 @@
         input.value = '';
         autoGrow();
         pendingStatus = null;
+
+        // The next patient should be able to just start talking. This runs on
+        // the button click, which is the gesture the browser wants before it
+        // will open the microphone; resumeListening() starts it once the
+        // greeting has been spoken. If the mic is blocked, onerror turns
+        // hands-free back off and says so, so the keyboard still works.
+        if (speechSupported) {
+            handsFreeSuspended = false;
+            voiceOutput.enable();
+            setHandsFree(true);
+        }
 
         setBusy(true);
 
@@ -1047,6 +1086,13 @@
     // needing a click per sentence. It reopens itself once the assistant has
     // finished speaking, and closes when the patient stops talking.
     var handsFree = false;
+    // Set when the assistant asks for the keyboard: listening is paused for
+    // that answer and restored on the next question.
+    var handsFreeSuspended = false;
+    // How long a gap is allowed mid-email before the answer is treated as
+    // finished. Long enough to spell "j o h n ... dot ... s m i t h".
+    var SPELLING_PAUSE_MS = 2500;
+    var spellingTimer = null;
     var unheardInARow = 0;
 
     if (!speechSupported) {
@@ -1069,7 +1115,8 @@
     micBtn.addEventListener('click', function () {
         if (!speechSupported) { return; }
 
-        if (handsFree) { setHandsFree(false); return; }
+        // Turning it off by hand means off - not "off until the next question".
+        if (handsFree) { handsFreeSuspended = false; setHandsFree(false); return; }
 
         // Speaking into the mic implies a spoken conversation, so switch replies
         // to voice too - and never talk over the patient.
@@ -1102,11 +1149,23 @@
         });
     }
 
+    /** True while the assistant is waiting for an email address. */
+    function spellingFriendly() {
+        return currentStep === 'email' || currentStep === 'email_confirm';
+    }
+
     function startListening() {
         recognition = new SpeechRecognition();
         recognition.lang = 'en-US';
         recognition.interimResults = true;
-        recognition.continuous = false;
+
+        // People spell an email out with gaps - "j o h n ... dot ... s m i t h"
+        // - and the default endpointing treats the first gap as the end of the
+        // answer. Only while the email is being asked for, keep listening and
+        // decide the turn is over ourselves, after a longer quiet spell.
+        // Everywhere else the browser's own end-of-speech detection is left
+        // exactly as it was.
+        recognition.continuous = spellingFriendly();
         recognition.maxAlternatives = 1;
 
         var finalText = '';
@@ -1127,6 +1186,17 @@
             // The raw engine output, before this page touches it.
             if (DEBUG && finalText) {
                 console.log('[pm] speech final=' + JSON.stringify(finalText));
+            }
+
+            // While spelling an email, the browser is not allowed to call the
+            // end of the turn - we do, once they have been quiet for a while.
+            if (spellingFriendly()) {
+                window.clearTimeout(spellingTimer);
+                spellingTimer = window.setTimeout(function () {
+                    if (listening) {
+                        try { recognition.stop(); } catch (error) { /* already stopped */ }
+                    }
+                }, SPELLING_PAUSE_MS);
             }
         };
 
@@ -1176,6 +1246,7 @@
 
     function stopListening(keepHint) {
         listening = false;
+        window.clearTimeout(spellingTimer);
         micBtn.classList.remove('listening');
         micBtn.classList.toggle('armed', handsFree);
 
@@ -1198,7 +1269,34 @@
 
     /* ---------------- boot ---------------- */
 
+    /**
+     * Open the microphone on load, but only when this browser has already been
+     * given permission for this site.
+     *
+     * There is no click to lean on here, so a browser that has never been asked
+     * would either refuse outright or throw up a prompt nobody invited - and
+     * the patient would be looking at an error before saying a word. Once
+     * permission has been granted, every later visit starts listening on its
+     * own; until then the microphone button is one tap away, as before.
+     */
+    function armMicrophoneIfAllowed() {
+        if (!speechSupported || !navigator.permissions || !navigator.permissions.query) { return; }
+
+        try {
+            navigator.permissions.query({ name: 'microphone' }).then(function (status) {
+                if (status.state !== 'granted' || handsFree) { return; }
+
+                voiceOutput.enable();
+                setHandsFree(true);
+
+                // The opening greeting may still be being spoken; this waits.
+                resumeListening(null);
+            }).catch(function () { /* the browser will not say - leave it to the tap */ });
+        } catch (error) { /* same */ }
+    }
+
     send({ start: true });
+    armMicrophoneIfAllowed();
 })();
 </script>
 @endsection
