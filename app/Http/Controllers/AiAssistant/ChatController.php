@@ -670,9 +670,38 @@ class ChatController extends Controller
                 return [];
 
             case 'email':
-                $email = $this->cleanEmail($text);
-                if (!$email) {
-                    return [$this->say("Hmm, that doesn't look like a valid email address. Could you repeat it, or type it in?")];
+                $capture = $this->captureEmail($text);
+
+                Log::info('AI assistant email capture', [
+                    'source' => $source ?: 'text',
+                    'valid' => $capture['valid'],
+                    'confidence' => $capture['confidence'],
+                    'uncertain' => $capture['uncertain'],
+                    // Never the patient's words, and only a masked address.
+                    'email' => $this->maskEmail($capture['email']),
+                    'suggestion' => $this->maskEmail($capture['suggestion']),
+                ]);
+
+                if (!$capture['valid']) {
+                    return [$this->say("Hmm, that doesn't look like a valid email address. Could you repeat it, spell it out, or type it in?")];
+                }
+
+                // Words were said that did not reach the address. Accepting it
+                // would hand the practice an address the patient never gave.
+                if ($capture['confidence'] < 0.5) {
+                    return [$this->say("I only caught part of that - I heard " . $capture['email']
+                        . ". Could you say the whole address again, spell it out, or type it in?")];
+                }
+
+                // A domain that looks like a mis-hearing. The address is NOT
+                // changed here: the corrected one is put to the patient and
+                // only used if they say yes.
+                if ($capture['suggestion'] !== null) {
+                    $state['pending_email'] = $capture['suggestion'];
+                    $state['pending_email_heard'] = $capture['email'];
+                    $state['step'] = 'email_confirm';
+
+                    return [];
                 }
 
                 // Speech recognition mangles domains it does not know - "yopmail"
@@ -681,21 +710,23 @@ class ChatController extends Controller
                 // before trusting it. Typed answers are already on screen, so
                 // they go straight through.
                 if ($source === 'voice') {
-                    $state['pending_email'] = $email;
+                    $state['pending_email'] = $capture['email'];
+                    $state['pending_email_heard'] = null;
                     $state['step'] = 'email_confirm';
 
                     return [];
                 }
 
-                $state['patient']['email'] = $email;
+                $state['patient']['email'] = $capture['email'];
                 $state['step'] = 'gender';
 
-                return [$this->say('Thanks, I have ' . $email . '.')];
+                return [$this->say('Thanks, I have ' . $capture['email'] . '.')];
 
             case 'email_confirm':
                 if ($this->saidYes($choiceValue, $text)) {
                     $state['patient']['email'] = $state['pending_email'];
                     $state['pending_email'] = null;
+                    $state['pending_email_heard'] = null;
                     $state['step'] = 'gender';
 
                     return [$this->say('Great, thank you.')];
@@ -705,6 +736,7 @@ class ChatController extends Controller
                 if ($choiceValue === '' && ($corrected = $this->cleanEmail($text))
                     && $corrected !== $state['pending_email']) {
                     $state['pending_email'] = $corrected;
+                    $state['pending_email_heard'] = null;
 
                     return [];
                 }
@@ -712,6 +744,7 @@ class ChatController extends Controller
                 // Otherwise it was wrong. Saying it again would most likely be
                 // misheard the same way, so hand over to the keyboard.
                 $state['pending_email'] = null;
+                $state['pending_email_heard'] = null;
                 $state['step'] = 'email';
 
                 return [$this->say("No problem - email addresses are hard to hear correctly. Could you type it in instead?", 'focus')];
@@ -1191,7 +1224,13 @@ class ChatController extends Controller
 
             case 'email_confirm':
                 return [
-                    'text' => 'I heard ' . ($state['pending_email'] ?? '') . ' - is that right?',
+                    // When the domain looked like a mis-hearing, both are shown:
+                    // what was heard, and what it is probably meant to be. The
+                    // patient decides, not the assistant.
+                    'text' => !empty($state['pending_email_heard'])
+                        ? 'I heard ' . $state['pending_email_heard'] . ' - did you mean '
+                            . ($state['pending_email'] ?? '') . '?'
+                        : 'I heard ' . ($state['pending_email'] ?? '') . ' - is that right?',
                     'options' => $this->options('email_confirm', [
                         ['value' => 'yes', 'title' => "Yes, that's right"],
                         ['value' => 'no', 'title' => "No, I'll type it"],
@@ -1437,6 +1476,11 @@ class ChatController extends Controller
         $slots = $this->fetchSlots($state, $client);
 
         if (empty($slots)) {
+            // The practice's own rules left nothing bookable - a different
+            // thing from a full diary, and worth saying differently. The reason
+            // is not guessed at: only the practice knows it.
+            $refused = !empty($state['booking_window']['none']);
+
             $state['appointment_type'] = null;
             // The type was understood; PureMed simply has nothing free. That is
             // a complete answer, and it leaves the step unchanged - without this
@@ -1444,7 +1488,13 @@ class ChatController extends Controller
             // handled, costing a needless call on every unavailable type.
             $state['_handled'] = true;
 
-            return [$this->say("I couldn't find any free times for that appointment in the next " . config('ai-assistant.slot_window_days') . " days. You can try a different appointment type, or pick another doctor.", 'error')];
+            return [$this->say($refused
+                ? "The practice isn't offering that appointment with " . $this->doctorDisplay($state['doctor'])
+                    . ' at the moment. You could try a different appointment type, or another doctor - '
+                    . 'the practice can tell you more.'
+                : "I couldn't find any free times for that appointment in the next "
+                    . config('ai-assistant.slot_window_days') . ' days. You can try a different appointment type, or pick another doctor.',
+                'error')];
         }
 
         $state['slots'] = $slots;
@@ -1621,6 +1671,11 @@ class ChatController extends Controller
             'date' => $slot['slot_date'],
             'time' => $slot['time'],
         ];
+        // Whether the patient may book again depends on the appointments they
+        // hold, and they have just gained one. The remembered window is about
+        // the patient as they were a moment ago, so it is thrown away rather
+        // than reused for a second booking.
+        $state['booking_window'] = null;
         $state['step'] = 'done';
 
         return [
@@ -1785,6 +1840,8 @@ class ChatController extends Controller
             'appointment' => null,
             'cancellable' => [],
             'cancel_target' => null,
+            // A new booking asks the practice again what it will allow.
+            'booking_window' => null,
             // Consumed at the slot step, once PureMed has told us what exists.
             'slot_hint' => $this->slotHint($text),
         ]);
@@ -1952,6 +2009,8 @@ class ChatController extends Controller
         // appointments no longer have a list to be about.
         $state['appointments_context'] = [];
         $state['discussed_appointment'] = 0;
+        // And what the practice will allow is asked again, not remembered.
+        $state['booking_window'] = null;
 
         if (!empty($state['doctors'])) {
             $state['step'] = 'doctor';
@@ -2000,6 +2059,9 @@ class ChatController extends Controller
 
         $state['cancellable'] = [];
         $state['cancel_target'] = null;
+        // Cancelling can make a patient eligible again, so the window has to be
+        // asked for afresh rather than remembered from before.
+        $state['booking_window'] = null;
         $state['step'] = 'cancelled';
 
         // Remember what was cancelled, so "book the same again" does not make
@@ -2041,11 +2103,20 @@ class ChatController extends Controller
     /**
      * @return array<int, array> normalised, bookable slots
      */
-    private function fetchSlots(array $state, PureMedApiClient $client): array
+    private function fetchSlots(array &$state, PureMedApiClient $client): array
     {
+        $window = $this->bookingWindow($state, $client);
+
+        // The practice's rules leave nothing bookable, so there is nothing to
+        // ask for. Asking anyway would return dates it will not accept.
+        if (!empty($window['none'])) {
+            return [];
+        }
+
         $result = $client->getDoctorSlots($state['token'], $this->buildSlotRequestPayload(
             $state['doctor'],
-            $state['appointment_type']
+            $state['appointment_type'],
+            $window
         ));
 
         return $result['ok'] ? $this->normalizeSlots((array) $result['data']) : [];
@@ -2055,16 +2126,117 @@ class ChatController extends Controller
      * get-doctor-slots validates start_date/end_date as date_format:d.m.Y
      * (Api\v3\OptimalAppointmentController::getDoctorSlots).
      */
-    private function buildSlotRequestPayload(?array $doctor, ?array $appointmentType): array
+    /**
+     * @param  array{start_date: string, end_date: string, from_time: string, to_time: string}  $window
+     */
+    private function buildSlotRequestPayload(?array $doctor, ?array $appointmentType, array $window): array
     {
         return [
             'doctor_id' => $doctor['id'] ?? null,
             'appointment_type_id' => $appointmentType['id'] ?? null,
-            'start_date' => Carbon::today()->format('d.m.Y'),
-            'end_date' => Carbon::today()->addDays((int) config('ai-assistant.slot_window_days', 30))->format('d.m.Y'),
-            'from_time' => '00:00',
-            'to_time' => '23:59',
+            // The practice's window and hours, not the assistant's. Asking for
+            // 00:00-23:59 returned times no practice would offer - 04:00, 22:50.
+            'start_date' => $window['start_date'],
+            'end_date' => $window['end_date'],
+            'from_time' => $window['from_time'],
+            'to_time' => $window['to_time'],
             'week_day_id' => '1,2,3,4,5,6,7',
+        ];
+    }
+
+    /**
+     * The window the practice will actually take bookings in.
+     *
+     * Read from get-from-date, which is where the quarter rules, the booking
+     * timeframe and the appointment type's optimal_appointment flag are applied
+     * - the same call the main app makes. Held in the session per doctor and
+     * appointment type, because slots are fetched several times in one booking:
+     * when a time is picked, when it is held, and again before booking.
+     *
+     * @return array{start_date: string, end_date: string, from_time: string, to_time: string, key: string}
+     */
+    private function bookingWindow(array &$state, PureMedApiClient $client): array
+    {
+        $doctorId = $state['doctor']['id'] ?? null;
+        $typeId = $state['appointment_type']['id'] ?? null;
+        $key = $doctorId . '|' . $typeId;
+
+        $cached = $state['booking_window'] ?? null;
+
+        if (is_array($cached) && ($cached['key'] ?? null) === $key) {
+            return $cached;
+        }
+
+        $window = null;
+
+        // Only once we know who is booking, with whom, and for what - the call
+        // requires all three.
+        if ($state['patient_id'] && $state['token'] && $doctorId && $typeId) {
+            $result = $client->getFromDate($state['token'], [
+                'patient_id' => $state['patient_id'],
+                'doctor_id' => $doctorId,
+                'appointment_type_id' => $typeId,
+            ]);
+
+            $data = (array) ($result['data'] ?? []);
+            $body = (array) ($result['body'] ?? []);
+
+            // Did the practice evaluate its rules and decline, or did the call
+            // simply not work? A decline comes back with no errors and a data
+            // key; an expired token comes back with errors and no data. Telling
+            // a patient "the practice isn't offering that" because a token had
+            // expired would be worse than showing nothing at all.
+            $refused = (int) ($result['http_status'] ?? 0) === 200
+                && empty($result['errors'])
+                && array_key_exists('data', $body);
+
+            if ($result['ok'] && !empty($data['start_date']) && !empty($data['end_date'])) {
+                $defaults = $this->defaultBookingWindow();
+
+                $window = [
+                    'start_date' => (string) $data['start_date'],
+                    'end_date' => (string) $data['end_date'],
+                    'from_time' => (string) ($data['from_time'] ?: $defaults['from_time']),
+                    'to_time' => (string) ($data['to_time'] ?: $defaults['to_time']),
+                ];
+            } elseif ($refused) {
+                // The practice answered and offered NO window - its own rules
+                // say this patient cannot book this appointment at the moment,
+                // for instance because they already have one this quarter.
+                // Falling back here would offer dates the practice refuses,
+                // which is exactly what it did before this branch existed.
+                Log::info('AI assistant: the practice offers no booking window', [
+                    'doctor_id' => $doctorId,
+                    'appointment_type_id' => $typeId,
+                    'reason' => $result['message'] ?? null,
+                ]);
+
+                $window = ['none' => true, 'start_date' => '', 'end_date' => '',
+                    'from_time' => '', 'to_time' => ''];
+            }
+        }
+
+        // Only a call that never reached the practice falls back to a window of
+        // our own; a refusal is never overridden.
+        if ($window === null) {
+            $window = $this->defaultBookingWindow();
+        }
+
+        $window['key'] = $key;
+        $state['booking_window'] = $window;
+
+        return $window;
+    }
+
+    /** Used only when the practice's own window cannot be read. */
+    private function defaultBookingWindow(): array
+    {
+        return [
+            'start_date' => Carbon::today()->format('d.m.Y'),
+            'end_date' => Carbon::today()
+                ->addDays((int) config('ai-assistant.slot_window_days', 30))->format('d.m.Y'),
+            'from_time' => (string) config('ai-assistant.default_from_time', '06:00'),
+            'to_time' => (string) config('ai-assistant.default_to_time', '21:00'),
         ];
     }
 
@@ -3551,6 +3723,11 @@ class ChatController extends Controller
             return true;
         }
 
+        // "show me all appointments", "every appointment"
+        if (preg_match('/\b(all|every|each)\s+(of\s+)?(the\s+)?appointments?\b/u', $value) === 1) {
+            return true;
+        }
+
         // "when is my next appointment (with the doctor)?", "my next appointment"
         if (preg_match('/\bnext appointment\b/u', $value) === 1) {
             return true;
@@ -3596,11 +3773,31 @@ class ChatController extends Controller
     {
         $value = mb_strtolower(trim($text));
 
+        if ($value === '') {
+            return false;
+        }
+
+        // Booking needs a VERB. The bare word "appointment" used to be enough,
+        // which meant every question containing it - "how many appointments do
+        // I have", "show me all appointments" - started a new booking whenever
+        // the viewing matcher did not recognise the phrasing first. Six
+        // different phrasings hit that before this was tightened; an unfamiliar
+        // one now falls through to a harmless reply instead.
+        if (preg_match('/\b(book|booking|schedule|scheduling|termin)\b/u', $value) === 1) {
+            return true;
+        }
+
         // "see Dr Gunnar" is a request to be seen, and so is "see a doctor".
         // "which doctor should I see?" is a question and deliberately misses,
         // because "see" is not followed by a doctor there.
-        return $value !== '' && preg_match(
-            '/\b(book|booking|appointment|appointments|termin|schedule|make an appointment)\b|\bsee (?:a |the |dr |doctor)/',
+        if (preg_match('/\bsee (?:a |the |dr |doctor)/u', $value) === 1) {
+            return true;
+        }
+
+        // "I want an appointment", "I need a new appointment", "can I get an
+        // appointment tomorrow" - asking for one, rather than about one.
+        return preg_match(
+            '/\b(want|need|like|get|make|take|fix|arrange)\b[^.?]{0,14}\b(an|a|another|new|one more)\s+appointment\b/u',
             $value
         ) === 1;
     }
@@ -3897,6 +4094,146 @@ class ChatController extends Controller
      * the rate " would turn the rest of the phrase into part of the domain and
      * silently store a valid-looking but wrong address.
      */
+    /**
+     * Everything known about an email address the patient just gave.
+     *
+     * cleanEmail() answers "what address is in these words". This answers the
+     * questions that decide what to do about it: is it well formed, how much of
+     * the patient's words survived into it, and does the domain look like a
+     * near miss for a common one. Nothing here changes the address - a
+     * suggestion is only ever offered for the patient to confirm.
+     *
+     * @return array{raw: string, email: ?string, valid: bool, confidence: float,
+     *               suggestion: ?string, uncertain: ?string}
+     */
+    private function captureEmail(string $spoken): array
+    {
+        $result = [
+            'raw' => trim($spoken),
+            'email' => null,
+            'valid' => false,
+            'confidence' => 0.0,
+            'suggestion' => null,
+            'uncertain' => null,
+        ];
+
+        $email = $this->cleanEmail($spoken);
+
+        if ($email === null || !$this->emailShapeValid($email)) {
+            return $result;
+        }
+
+        $result['email'] = $email;
+        $result['valid'] = true;
+        $result['confidence'] = 1.0;
+
+        // Words were spoken that did not survive into the address. "john
+        // smith@gmail.com" quietly became "smith@gmail.com" - the patient would
+        // have been given an address they never said.
+        if ($this->emailDroppedWords($spoken, $email)) {
+            $result['confidence'] = 0.4;
+            $result['uncertain'] = 'local';
+
+            return $result;
+        }
+
+        // A domain one or two letters away from a common one: "gamil.com".
+        $domain = substr($email, (int) strrpos($email, '@') + 1);
+        $suggested = $this->suggestEmailDomain($domain);
+
+        if ($suggested !== null) {
+            $result['confidence'] = 0.7;
+            $result['uncertain'] = $domain;
+            $result['suggestion'] = substr($email, 0, (int) strrpos($email, '@') + 1) . $suggested;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Shape checks the extraction regex alone does not make.
+     */
+    private function emailShapeValid(string $email): bool
+    {
+        if ($email === '' || mb_strlen($email) > 254 || str_contains($email, ' ')) {
+            return false;
+        }
+
+        if (substr_count($email, '@') !== 1 || str_contains($email, '..')) {
+            return false;
+        }
+
+        [$local, $domain] = explode('@', $email);
+
+        if ($local === '' || mb_strlen($local) > 64 || $domain === '') {
+            return false;
+        }
+
+        // A domain needs a dot and a plausible top level: "john@gmail" is not
+        // an address a practice can write to.
+        return preg_match('/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/', $domain) === 1;
+    }
+
+    /**
+     * Whether the patient said words that never reached the address.
+     *
+     * Only the local part is checked: a word immediately before it means the
+     * extraction started mid-phrase and threw the beginning away.
+     */
+    private function emailDroppedWords(string $spoken, string $email): bool
+    {
+        $local = substr($email, 0, (int) strpos($email, '@'));
+        $haystack = mb_strtolower($spoken);
+        $position = mb_strpos($haystack, $local . '@');
+
+        if ($position === false) {
+            // The address was assembled from spoken words rather than lifted
+            // whole, which the normaliser is there to do.
+            return false;
+        }
+
+        $before = rtrim(mb_substr($haystack, 0, $position));
+
+        return $before !== '' && preg_match('/[a-z0-9._%+-]$/', $before) === 1;
+    }
+
+    /**
+     * A common domain this one is probably a mis-hearing of, or null.
+     */
+    private function suggestEmailDomain(string $domain): ?string
+    {
+        $known = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
+            'yopmail.com', 'live.com', 'aol.com', 'gmx.at', 'gmx.de', 'web.de'];
+
+        if (in_array($domain, $known, true)) {
+            return null;
+        }
+
+        foreach ($known as $candidate) {
+            $distance = levenshtein($domain, $candidate);
+
+            // One or two letters out on a domain of a reasonable length. Short
+            // domains are left alone: "web.de" is two edits from "gmx.de".
+            if ($distance > 0 && $distance <= 2 && mb_strlen($candidate) >= 8) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /** j***@gmail.com - enough to debug with, not enough to identify anyone. */
+    private function maskEmail(?string $email): string
+    {
+        if (!$email || !str_contains($email, '@')) {
+            return '(none)';
+        }
+
+        [$local, $domain] = explode('@', $email, 2);
+
+        return mb_substr($local, 0, 1) . '***@' . $domain;
+    }
+
     private function cleanEmail(string $value): ?string
     {
         $value = mb_strtolower(trim($value));
@@ -3925,6 +4262,7 @@ class ChatController extends Controller
             ' underscore ' => '_',
             ' hyphen ' => '-',
             ' dash ' => '-',
+            ' plus ' => '+',
             ' dot ' => '.',
             ' period ' => '.',
             ' full stop ' => '.',
@@ -4454,6 +4792,8 @@ class ChatController extends Controller
             'chip_page' => 0,
             'patient' => [],
             'pending_email' => null,
+            // What was heard, when it differs from what is being suggested.
+            'pending_email_heard' => null,
             'patient_id' => null,
             'token' => null,
             'doctors' => [],
@@ -4478,6 +4818,10 @@ class ChatController extends Controller
             // Which of them was last talked about, so "the other one" has
             // something to be relative to.
             'discussed_appointment' => 0,
+            // The practice's bookable window for the doctor and appointment
+            // type currently chosen, so it is read once rather than on every
+            // slot fetch. Keyed by both, so changing either re-reads it.
+            'booking_window' => null,
             // The appointment cancelled in this conversation, kept so it can be
             // offered again without asking for the same four answers.
             'last_cancelled' => null,

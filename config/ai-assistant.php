@@ -19,6 +19,11 @@ return [
     'register_endpoint' => env('PUREMED_REGISTER_ENDPOINT', '/api/v3/register'),
     'doctors_endpoint' => env('PUREMED_DOCTORS_ENDPOINT', '/api/v3/get-doctors'),
     'appointment_types_endpoint' => env('PUREMED_APPOINTMENT_TYPES_ENDPOINT', '/api/v3/get-appointment-types'),
+    // The practice's own booking window: quarter rules, booking timeframe and
+    // the appointment type's optimal_appointment flag all decide what this
+    // returns. The assistant asks for it rather than assuming a window, so it
+    // offers the same dates and hours the main app does.
+    'from_date_endpoint' => env('PUREMED_FROM_DATE_ENDPOINT', '/api/v3/get-from-date'),
     'doctor_slots_endpoint' => env('PUREMED_DOCTOR_SLOTS_ENDPOINT', '/api/v3/get-doctor-slots'),
     'booking_endpoint' => env('PUREMED_BOOKING_ENDPOINT', '/api/v3/appointment/book-newtest'),
     'appointments_endpoint' => env('PUREMED_APPOINTMENTS_ENDPOINT', '/api/v3/get-appointment'),
@@ -37,10 +42,15 @@ return [
     | Slot search window
     |--------------------------------------------------------------------------
     |
-    | How many days ahead of today the assistant asks get-doctor-slots for.
+    | Only used when get-from-date cannot tell us the practice's own window -
+    | the assistant asks for that first and prefers it. These are the fallback
+    | so a failed call still shows availability rather than none, and they match
+    | the hours the main app uses.
     |
     */
     'slot_window_days' => (int) env('PUREMED_SLOT_WINDOW_DAYS', 30),
+    'default_from_time' => env('PUREMED_DEFAULT_FROM_TIME', '06:00'),
+    'default_to_time' => env('PUREMED_DEFAULT_TO_TIME', '21:00'),
 
     /*
     |--------------------------------------------------------------------------
