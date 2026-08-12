@@ -379,6 +379,7 @@
     var pendingStatus = null;
     // Set when the pending message came from the microphone rather than typing.
     var spokenSubmission = false;
+    var DEBUG = /[?&]pmdebug=1\b/.test(window.location.search);
 
     // The bubbles belonging to the newest typed or spoken turn, so a correction
     // can take them back off the screen. Only ever the latest turn: older ones
@@ -839,6 +840,13 @@
         var source = spokenSubmission ? 'voice' : 'text';
         spokenSubmission = false;
 
+        // Add ?pmdebug=1 to the URL to see exactly what the speech engine
+        // produced and what is being sent. Nothing is altered between the two -
+        // this is here to prove where a wrong address came from.
+        if (DEBUG) {
+            console.log('[pm] source=' + source + ' transcript=' + JSON.stringify(text));
+        }
+
         // "start over" and friends are handled by the server so every phrasing
         // behaves the same. The Start over button is the explicit reset.
         removeEditControl();
@@ -864,6 +872,12 @@
         removeEditControl();
         turn = null;
         editing = false;
+
+        // Anything half-typed belongs to the previous patient. On a shared
+        // device it must not be waiting in the box for the next one.
+        input.value = '';
+        autoGrow();
+        pendingStatus = null;
 
         setBusy(true);
 
@@ -1109,6 +1123,11 @@
             input.value = (finalText + ' ' + interim).trim();
             autoGrow();
             hint.textContent = 'Listening... ' + (interim || finalText);
+
+            // The raw engine output, before this page touches it.
+            if (DEBUG && finalText) {
+                console.log('[pm] speech final=' + JSON.stringify(finalText));
+            }
         };
 
         recognition.onerror = function (event) {
