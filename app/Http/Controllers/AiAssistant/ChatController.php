@@ -28,6 +28,20 @@ class ChatController extends Controller
     private const SESSION_KEY = 'ai_assistant.conversation';
 
     /**
+     * The shape of the conversation flow.
+     *
+     * Bump this whenever the order of the steps changes, or a step is added or
+     * removed. Conversations live for two hours and survive a browser close, so
+     * without it a patient who was mid-conversation when the flow changed is
+     * resumed onto a step that no longer fits - being asked for a name before
+     * the practice has any way to recognise them, for instance.
+     *
+     * 1: first name -> last name -> mobile -> date of birth -> email -> gender
+     * 2: mobile -> date of birth, then registration only if unrecognised
+     */
+    private const FLOW_VERSION = 2;
+
+    /**
      * Where the one-turn undo snapshot lives.
      *
      * Exactly one snapshot is kept - the state as it was before the patient's
@@ -69,12 +83,23 @@ class ChatController extends Controller
         'consultation', 'start', 'over', 'again', 'sorry', 'ok', 'okay',
     ];
 
-    /** Steps that collect patient details, in order. */
+    /**
+     * Steps that collect patient details, in the order they are asked for.
+     *
+     * Mobile and date of birth come first because together they are the only
+     * thing needed to recognise a patient the practice already has - and they
+     * are the practice's own duplicate key too (GeneralTrait::
+     * _checkDuplicationPatient compares birth_date and mobile_no). Asking them
+     * first means a returning patient answers two questions instead of four,
+     * and anyone who gives up before registering has left no name or email
+     * behind. The remaining fields are all required by the register API and are
+     * collected unchanged.
+     */
     private const REGISTRATION_STEPS = [
-        'first_name',
-        'last_name',
         'mobile_no',
         'birth_date',
+        'first_name',
+        'last_name',
         'email',
         'gender',
     ];
@@ -580,21 +605,21 @@ class ChatController extends Controller
                 // to cancel.
                 if ($this->wantsCancel($text) || $choiceValue === 'cancel') {
                     $state['goal'] = 'cancel';
-                    $state['step'] = 'first_name';
+                    $state['step'] = 'mobile_no';
 
                     return [$this->say("Of course. I'll just need a few details to find your booking.")];
                 }
 
                 if ($this->wantsAppointmentList($text) || $choiceValue === 'list') {
                     $state['goal'] = 'list';
-                    $state['step'] = 'first_name';
+                    $state['step'] = 'mobile_no';
 
                     return [$this->say("Happy to. I'll just need a few details to look them up.")];
                 }
 
                 if ($this->wantsBooking($text) || $choiceValue === 'book') {
                     $state['goal'] = 'book';
-                    $state['step'] = 'first_name';
+                    $state['step'] = 'mobile_no';
                     // "I'd like an appointment tomorrow morning" says two things.
                     // Remember the second one until there is real availability
                     // to check it against.
@@ -665,9 +690,11 @@ class ChatController extends Controller
                     return [$this->say("I couldn't find any records for that mobile number and date of birth. Could you check the number for me?", 'error')];
                 }
 
-                $state['step'] = 'email';
+                // Not a patient the practice holds, so the rest of the details
+                // the register API requires are collected from here on.
+                $state['step'] = $this->nextRegistrationStep('birth_date');
 
-                return [];
+                return [$this->say("Thanks. I'll just need a few details to set you up.")];
 
             case 'email':
                 $capture = $this->captureEmail($text);
@@ -1214,7 +1241,9 @@ class ChatController extends Controller
                 ];
 
             case 'mobile_no':
-                return ['text' => 'Thanks. What mobile number can the practice reach you on?', 'input' => $this->input()];
+                // The first thing asked now, so it no longer thanks the patient
+                // for an answer they have not given yet.
+                return ['text' => 'What mobile number can the practice reach you on?', 'input' => $this->input()];
 
             case 'birth_date':
                 return ['text' => 'And your date of birth?', 'input' => $this->input()];
@@ -1390,7 +1419,13 @@ class ChatController extends Controller
         $state['doctors'] = $this->keepFields($doctors['data'], ['id', 'first_name', 'last_name', 'doctor_speciality']);
         $state['step'] = 'doctor';
 
-        $replies = [$this->say('Welcome back, ' . $state['patient']['first_name'] . '! I have your details already.')];
+        // The name now comes from the practice's record rather than from the
+        // patient, because it is no longer asked for before they are found.
+        $known = trim((string) ($state['patient']['first_name'] ?? ''));
+
+        $replies = [$this->say($known !== ''
+            ? 'Welcome back, ' . $known . '! I have your details already.'
+            : 'Welcome back! I have your details already.')];
 
         // Take them straight to what they came for.
         if (($state['goal'] ?? 'book') === 'cancel') {
@@ -4781,12 +4816,27 @@ class ChatController extends Controller
 
     private function state(): array
     {
-        return array_merge($this->freshState(), session(self::SESSION_KEY, []));
+        $stored = session(self::SESSION_KEY, []);
+
+        // Started under an older flow, so the step it holds may no longer mean
+        // what it did. Nothing here is worth salvaging - it is one unfinished
+        // conversation, not patient data - so drop it and open cleanly on
+        // 'intent'. The undo snapshot goes with it: that holds a state of the
+        // same old shape, and restoring it would put the patient right back.
+        if ($stored !== [] && ($stored['flow'] ?? 0) !== self::FLOW_VERSION) {
+            session()->forget(self::SESSION_KEY);
+            session()->forget(self::UNDO_KEY);
+            $stored = [];
+        }
+
+        return array_merge($this->freshState(), $stored);
     }
 
     private function freshState(): array
     {
         return [
+            // Which flow this conversation began under. See FLOW_VERSION.
+            'flow' => self::FLOW_VERSION,
             'step' => 'intent',
             'goal' => 'book',
             'chip_page' => 0,
