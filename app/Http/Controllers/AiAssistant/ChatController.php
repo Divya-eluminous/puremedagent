@@ -493,6 +493,12 @@ class ChatController extends Controller
         // who the patient is - that is how people ask, rather than navigating.
         if ($state['patient_id'] && $state['token']
             && !in_array($state['step'], ['cancel_select', 'cancel_confirm'], true)) {
+            // "past appointments" asks for the history, not the upcoming list.
+            // Checked first: the list matcher recognises the word too.
+            if ($this->wantsPast($text)) {
+                return $this->loadPastAppointments($state, $client);
+            }
+
             if ($this->wantsAppointmentList($text)) {
                 return $this->loadAppointmentList($state, $client);
             }
@@ -1029,7 +1035,15 @@ class ChatController extends Controller
                 return [];
 
             case 'cancel_confirm':
-                if (!$this->saidYes($choiceValue, $text)) {
+                // "cancel" answering "shall I cancel this appointment?" is a
+                // yes. Only here - anywhere else the word STARTS a cancellation
+                // rather than confirming one, so it must not become a general
+                // agreement. A refusal still wins: "no, don't cancel" keeps it.
+                $confirmsCancel = $choiceValue === ''
+                    && !$this->saidNo($choiceValue, $text)
+                    && preg_match('/\b(cancel|remove|delete)\b/u', $this->normalizeText($text)) === 1;
+
+                if (!$this->saidYes($choiceValue, $text) && !$confirmsCancel) {
                     $state['cancel_target'] = null;
                     $state['rebook_after_cancel'] = false;
                     $state['step'] = $state['appointment'] ? 'done' : 'doctor';
@@ -3506,8 +3520,28 @@ class ChatController extends Controller
             return false;
         }
 
+        $value = $this->repairSpokenPast($value);
+
         // "how many appointments do I have", "how many appointments I have"
         if (preg_match('/\bhow many\b[^.]{0,20}\bappointments?\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "is there any upcoming appointment I have", "do I have any appointment"
+        if (preg_match('/\b(is there|are there|do i have|have i got|did i have)\b[^.?]{0,28}\bappointments?\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "upcoming appointment", "past appointment", "future appointments" -
+        // singular as well, which every pattern here used to miss.
+        if (preg_match('/\b(upcoming|past|previous|future|earlier)\s+appointments?\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "what appointment I have", "the appointment I have" - and the same
+        // said the other way round, "I have any appointment".
+        if (preg_match('/\bappointments?\b[^.?]{0,12}\bi have\b/u', $value) === 1
+            || preg_match('/\bi have\b[^.?]{0,12}\bappointments?\b/u', $value) === 1) {
             return true;
         }
 
@@ -3537,9 +3571,25 @@ class ChatController extends Controller
 
     private function wantsPast(string $text): bool
     {
-        $value = $this->normalizeText($text);
+        $value = $this->repairSpokenPast($this->normalizeText($text));
 
-        return $value !== '' && preg_match('/\b(past|previous|history|earlier|old) (appointment|appointments|visits)?\b/', $value) === 1;
+        if ($value === '') {
+            return false;
+        }
+
+        // The noun is required: "in the past" on its own is not a request for
+        // an appointment history.
+        return preg_match('/\b(past|previous|earlier|old)\s+(appointments?|visits?|bookings?)\b/u', $value) === 1
+            || preg_match('/\b(appointment\s+)?history\b/u', $value) === 1;
+    }
+
+    /**
+     * "pasta appointment" is what the speech engine makes of "past
+     * appointment". Repaired only when the next word settles the meaning.
+     */
+    private function repairSpokenPast(string $value): string
+    {
+        return preg_replace('/\b(pasta|paste|fast)\b(?=\s+(appointments?|visits?))/u', 'past', $value);
     }
 
     private function wantsBooking(string $text): bool
@@ -3577,6 +3627,19 @@ class ChatController extends Controller
 
         // "more appointment types", "more doctors", "more options please"
         if (preg_match('/\bmore\b\s+(options|choices|types?|appointments?|doctors?|times?|slots?|days?|dates?)\b/u', $value) === 1) {
+            return true;
+        }
+
+        // "show me other appointment types", "any different sorts"
+        // Deliberately no "doctor" here: "a different doctor" means change the
+        // one already chosen, which the escape hatch further down handles.
+        $things = '(option|options|choice|choices|type|types|sort|sorts|kind|kinds)';
+
+        if (preg_match('/\b(show|see|list|give|have|got|any)\b[^.?]{0,18}\b(other|another|different)\b[^.?]{0,14}\b' . $things . '\b/u', $value) === 1) {
+            return true;
+        }
+
+        if (preg_match('/\b(other|different)\s+(appointment\s+)?' . $things . '\b/u', $value) === 1) {
             return true;
         }
 
