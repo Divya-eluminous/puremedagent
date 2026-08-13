@@ -25,6 +25,10 @@ composer.lock
 /.bin
 /assets
 composer.json
-/tests
+# Everything under /tests stays out as before, except the AI assistant's own
+# suites. Git cannot re-include a path whose parent directory is excluded, so
+# the contents are excluded rather than the directory itself.
+/tests/*
+!/tests/ai-assistant/
 /usertesting
 /stubs
