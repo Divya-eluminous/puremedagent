@@ -534,7 +534,12 @@ class ChatController extends Controller
                 return $this->loadAppointmentList($state, $client);
             }
 
-            if ($this->wantsCancel($text)) {
+            // The chip is answered here rather than inside a step, so tapping
+            // "Cancel an appointment" and saying it reach the same line. It is
+            // a button, not a sentence: it needs no interpreting, and a chip
+            // never reaches the NLU anyway. Either way the list is re-read from
+            // PureMed rather than trusted from state.
+            if ($choiceValue === 'cancel' || $this->wantsCancel($text)) {
                 return $this->loadCancellableAppointments($state, $client);
             }
         }
@@ -1261,16 +1266,27 @@ class ChatController extends Controller
                 ];
 
             case 'appointments':
+                // Cancelling is only offered when there is something to cancel.
+                // What counts is the practice's own answer, held in
+                // 'cancellable' exactly as get-appointment returned it - that
+                // endpoint decides (status = 1 and start_date >= now) and
+                // nothing is re-judged here. Saying "you have no upcoming
+                // appointments" and then offering to cancel one read as a bug
+                // to the patient, and it was one.
+                $items = [['value' => 'book', 'title' => 'Book an appointment']];
+
+                if (!empty($state['cancellable'])) {
+                    $items[] = ['value' => 'cancel', 'title' => 'Cancel an appointment'];
+                }
+
+                $items[] = ['value' => 'past', 'title' => 'Past appointments'];
+
                 return [
                     'text' => 'Anything else I can help you with?',
                     'options' => [
                         'type' => 'appointments',
                         'summary' => $state['appointment_list'] ?? [],
-                        'items' => [
-                            ['value' => 'book', 'title' => 'Book an appointment'],
-                            ['value' => 'cancel', 'title' => 'Cancel an appointment'],
-                            ['value' => 'past', 'title' => 'Past appointments'],
-                        ],
+                        'items' => $items,
                     ],
                     'input' => $this->input(),
                 ];
@@ -1804,6 +1820,11 @@ class ChatController extends Controller
         ]) : [];
 
         if (empty($appointments)) {
+            // The practice has just said there is nothing, so anything held
+            // from an earlier fetch is out of date. Left behind, it would keep
+            // offering a Cancel button for appointments that are gone.
+            $state['cancellable'] = [];
+
             // Leave the step alone so the patient carries on where they were.
             return [$this->say("You don't have any upcoming appointments to cancel.")];
         }
@@ -1841,6 +1862,8 @@ class ChatController extends Controller
 
         if (empty($appointments)) {
             $state['appointment_list'] = [];
+            // Same response, same list: nothing to show is nothing to cancel.
+            $state['cancellable'] = [];
 
             return [$this->say("You don't have any upcoming appointments at the moment.")];
         }
@@ -4823,20 +4846,53 @@ class ChatController extends Controller
 
     /**
      * patients.gender is char(1) using PureMed's M / W convention.
+     *
+     * Matched word by word rather than against the whole answer, because people
+     * reply "I'm male" rather than "male", and speech recognition writes that
+     * word as "mail" - often twice, "mail mail", when it re-hears itself.
+     *
+     * Splitting into words is what makes this safe: "female" contains "male"
+     * and "woman" contains "man", so a substring check would read both as male.
+     * As whole words they are only ever themselves. Punctuation is trimmed from
+     * each end but left inside, so "male." counts and "e-mail" stays one word
+     * that matches nothing.
+     *
+     * Only the words listed here count - no other answer becomes a gender. An
+     * answer carrying both, such as the question repeated back, is ambiguous
+     * rather than a decision, so it is refused too.
      */
     private function normalizeGender(string $gender): ?string
     {
         $value = mb_strtolower(trim($gender));
 
-        if (in_array($value, ['w', 'f', 'female', 'woman', 'weiblich', 'frau'], true)) {
-            return 'W';
+        // An answer that is plainly about an email address is not an answer to
+        // this question - and "mail" is exactly what the recogniser writes for
+        // "male", so this has to be settled before any word is matched.
+        if (preg_match('/@|\be[-\s]?mails?\b/u', $value) === 1) {
+            return null;
         }
 
-        if (in_array($value, ['m', 'male', 'man', 'maennlich', 'männlich', 'mann'], true)) {
-            return 'M';
+        $female = ['w', 'f', 'female', 'females', 'femail', 'femails', 'femaile',
+            'woman', 'women', 'weiblich', 'frau'];
+        $male = ['m', 'male', 'males', 'mail', 'mails', 'maile', 'mael',
+            'man', 'men', 'maennlich', 'männlich', 'mann'];
+
+        $found = [];
+
+        foreach (preg_split('/\s+/u', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $word) {
+            // Strip what surrounds the word, keep what is inside it.
+            $word = preg_replace('/^[^\p{L}]+|[^\p{L}]+$/u', '', $word);
+
+            if (in_array($word, $female, true)) {
+                $found['W'] = true;
+            }
+
+            if (in_array($word, $male, true)) {
+                $found['M'] = true;
+            }
         }
 
-        return null;
+        return count($found) === 1 ? array_key_first($found) : null;
     }
 
     /* -----------------------------------------------------------------
