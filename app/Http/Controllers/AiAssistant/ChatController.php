@@ -38,8 +38,9 @@ class ChatController extends Controller
      *
      * 1: first name -> last name -> mobile -> date of birth -> email -> gender
      * 2: mobile -> date of birth, then registration only if unrecognised
+     * 3: mobile and date of birth in one question, full name in one question
      */
-    private const FLOW_VERSION = 2;
+    private const FLOW_VERSION = 3;
 
     /**
      * Where the one-turn undo snapshot lives.
@@ -90,10 +91,15 @@ class ChatController extends Controller
      * thing needed to recognise a patient the practice already has - and they
      * are the practice's own duplicate key too (GeneralTrait::
      * _checkDuplicationPatient compares birth_date and mobile_no). Asking them
-     * first means a returning patient answers two questions instead of four,
-     * and anyone who gives up before registering has left no name or email
-     * behind. The remaining fields are all required by the register API and are
-     * collected unchanged.
+     * first means anyone who gives up before registering has left no name or
+     * email behind.
+     *
+     * The two are asked for in one question and the two names in another, so a
+     * returning patient is recognised from a single answer and a new one
+     * registers in four: mobile and date of birth, full name, email, gender.
+     * The steps stay separate here because each still has its own validator and
+     * its own question for when only half an answer arrives. The fields are all
+     * required by the register API and are collected unchanged.
      */
     private const REGISTRATION_STEPS = [
         'mobile_no',
@@ -634,34 +640,96 @@ class ChatController extends Controller
 
             case 'first_name':
             case 'last_name':
-                $name = $this->cleanName($text);
-                if (!$name) {
-                    $field = str_replace('_', ' ', $state['step']);
-
-                    // Repeating the request mid-registration is common. Saying
-                    // "I didn't catch that" reads as if the assistant forgot.
-                    if ($this->wantsBooking($text)) {
-                        return [$this->say("We're already booking that - I just need your " . $field . ' to carry on.')];
+                // The surname question is only ever reached when the surname is
+                // the one thing outstanding, so the whole answer is it - "van
+                // der Berg" stays one surname rather than being cut in two.
+                if ($state['step'] === 'last_name') {
+                    $surname = $this->cleanName($text);
+                    if (!$surname) {
+                        return [$this->notAName($text, 'last name')];
                     }
+                    $state['patient']['last_name'] = $surname;
+                    $state['step'] = $this->nextRegistrationStep('last_name');
 
-                    return [$this->say("Sorry, I didn't catch that. Could you tell me your " . $field . ' again?')];
+                    return [];
                 }
-                $state['patient'][$state['step']] = $name;
-                $state['step'] = $this->nextRegistrationStep($state['step']);
+
+                $parts = $this->splitName($text);
+                if (!$parts['first']) {
+                    return [$this->notAName($text, 'name')];
+                }
+
+                $state['patient']['first_name'] = $parts['first'];
+
+                // Both names in one answer, which is how most people reply to
+                // being asked their name. Only ask again when they gave one.
+                if ($parts['last']) {
+                    $state['patient']['last_name'] = $parts['last'];
+                    $state['step'] = $this->nextRegistrationStep('last_name');
+
+                    return [];
+                }
+
+                $state['step'] = 'last_name';
 
                 return [];
 
             case 'mobile_no':
-                $mobile = $this->cleanMobile($text);
-                if (!$mobile) {
-                    return [$this->say("That doesn't look like a valid mobile number. Please enter your mobile number again, digits only.")];
-                }
-                $state['patient']['mobile_no'] = $mobile;
-                $state['step'] = 'birth_date';
+                // One question asks for the number and the date of birth
+                // together, so the answer may carry either or both. Splitting
+                // decides only which words go to which validator; the
+                // validators themselves are the ones that always ran.
+                $identity = $this->splitIdentity($text);
 
-                // Read it back - speech recognition mishears digits, and the
-                // patient can only correct what they can see.
-                return [$this->say('Got it, ' . $mobile . '.')];
+                if (!$identity['mobile'] && !$identity['birth_date']) {
+                    // Nothing usable at all. Which question to repeat depends on
+                    // what is still outstanding.
+                    if (!empty($state['patient']['birth_date'])) {
+                        return [$this->say("That doesn't look like a valid mobile number. Please tell me the number again, digits only.")];
+                    }
+
+                    if ($identity['tried_date']) {
+                        return [$this->say("I couldn't read that as a date of birth. Could you give me your mobile number and date of birth again? For example: 664 1234567, 27.03.1993.")];
+                    }
+
+                    return [$this->say("Sorry, I didn't catch that. Could you give me your mobile number and your date of birth? For example: 664 1234567, 27.03.1993.")];
+                }
+
+                $replies = [];
+
+                if ($identity['mobile']) {
+                    $state['patient']['mobile_no'] = $identity['mobile'];
+
+                    // Read it back - speech recognition mishears digits, and the
+                    // patient can only correct what they can see.
+                    $replies[] = $this->say('Got it, ' . $identity['mobile'] . '.');
+                }
+
+                if ($identity['birth_date']) {
+                    $state['patient']['birth_date'] = $identity['birth_date']->format('Y-m-d');
+                }
+
+                // Ask only for whichever half is still missing. The prompts know
+                // what is already answered, so neither is asked for twice.
+                if (empty($state['patient']['mobile_no'])) {
+                    $state['step'] = 'mobile_no';
+
+                    return $replies;
+                }
+
+                if (empty($state['patient']['birth_date'])) {
+                    $state['step'] = 'birth_date';
+
+                    // A date was attempted and could not be read. Say so rather
+                    // than moving on as if it had never been mentioned.
+                    if ($identity['tried_date']) {
+                        $replies[] = $this->say("I couldn't read that as a date of birth, though.");
+                    }
+
+                    return $replies;
+                }
+
+                return array_merge($replies, $this->identifyPatient($state, $client, $authenticator));
 
             case 'birth_date':
                 $date = $this->parseBirthDate($text);
@@ -670,31 +738,7 @@ class ChatController extends Controller
                 }
                 $state['patient']['birth_date'] = $date->format('Y-m-d');
 
-                // Mobile + date of birth is exactly how the register API decides
-                // a patient already exists. Checking here means a returning
-                // patient is not asked for details PureMed already holds, and
-                // the booking uses the record the practice actually has.
-                $existing = $authenticator->authenticate(
-                    $state['patient']['mobile_no'],
-                    $state['patient']['birth_date']
-                );
-
-                if ($existing) {
-                    return $this->resumeExistingPatient($state, $existing, $client);
-                }
-
-                // Nothing to show or cancel if we have never seen this person.
-                if (in_array($state['goal'] ?? 'book', ['cancel', 'list'], true)) {
-                    $state['step'] = 'mobile_no';
-
-                    return [$this->say("I couldn't find any records for that mobile number and date of birth. Could you check the number for me?", 'error')];
-                }
-
-                // Not a patient the practice holds, so the rest of the details
-                // the register API requires are collected from here on.
-                $state['step'] = $this->nextRegistrationStep('birth_date');
-
-                return [$this->say("Thanks. I'll just need a few details to set you up.")];
+                return $this->identifyPatient($state, $client, $authenticator);
 
             case 'email':
                 $capture = $this->captureEmail($text);
@@ -1232,7 +1276,15 @@ class ChatController extends Controller
                 ];
 
             case 'first_name':
-                return ['text' => 'May I know your first name?', 'input' => $this->input()];
+                // Asked as one question, because that is how people answer it.
+                // Only narrowed to the given name when the surname is somehow
+                // already known.
+                return [
+                    'text' => empty($patient['last_name'])
+                        ? 'May I know your full name?'
+                        : 'And your first name?',
+                    'input' => $this->input(),
+                ];
 
             case 'last_name':
                 return [
@@ -1242,8 +1294,15 @@ class ChatController extends Controller
 
             case 'mobile_no':
                 // The first thing asked now, so it no longer thanks the patient
-                // for an answer they have not given yet.
-                return ['text' => 'What mobile number can the practice reach you on?', 'input' => $this->input()];
+                // for an answer they have not given yet. Both halves are asked
+                // together, and narrowed to the number alone when the date of
+                // birth has already been given.
+                return [
+                    'text' => empty($patient['birth_date'])
+                        ? 'What mobile number can the practice reach you on, and your date of birth?'
+                        : 'And what mobile number can the practice reach you on?',
+                    'input' => $this->input(),
+                ];
 
             case 'birth_date':
                 return ['text' => 'And your date of birth?', 'input' => $this->input()];
@@ -4071,8 +4130,12 @@ class ChatController extends Controller
 
         $words = preg_split('/\s+/u', $value);
 
-        // "van der Berg" is a surname; a sentence is not.
-        if (count($words) > 3) {
+        // "van der Berg" is a surname; a sentence is not. Four words rather
+        // than three because the name is now asked for in one question, so a
+        // given name and a surname of several parts arrive together - "Jan van
+        // der Berg". What actually keeps sentences out is the word check
+        // below, not the count.
+        if (count($words) > 4) {
             return null;
         }
 
@@ -4107,6 +4170,12 @@ class ChatController extends Controller
      */
     private function cleanMobile(string $value): ?string
     {
+        // A date is not part of a phone number. One question now asks for both,
+        // so "76643421 and 1 January 2002" arrives as a single answer - and
+        // every digit of the date would otherwise be absorbed into the number,
+        // storing a thirteen digit mobile the patient never gave.
+        $value = $this->withoutBirthDate($value);
+
         // Dictated numbers arrive as words: "one two one two one two".
         $digits = preg_replace('/\D+/', '', $this->wordsToNumbers(mb_strtolower(trim($value))));
 
@@ -4575,16 +4644,13 @@ class ChatController extends Controller
         };
 
         $candidates = [];
-        $patterns = [
-            // 01.01.1992, 01/01/1992, 01-01-1992
-            '/\b\d{1,2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{2,4}\b/u',
-            // 1992-01-01
-            '/\b(?:18|19|20)\d{2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{1,2}\b/u',
-            // 1 January 1992, 1st Jan 1992
-            '/\b\d{1,2}(?:st|nd|rd|th)?\s+[a-z]+\.?\s+(?:18|19|20)\d{2}\b/iu',
-            // January 1, 1992
-            '/\b[a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*(?:18|19|20)\d{2}\b/iu',
-        ];
+        $patterns = array_merge(
+            // Only here, not in the shared list: a two digit year is enough to
+            // read a date out of an answer that is meant to be one, but not
+            // enough to cut a span out of an answer that may be a phone number.
+            ['/\b\d{1,2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{2,4}\b/u'],
+            $this->birthDatePatterns()
+        );
 
         foreach ($patterns as $pattern) {
             if (preg_match($pattern, $value, $matches) === 1) {
@@ -4595,6 +4661,159 @@ class ChatController extends Controller
         $candidates[] = $tidy($value);
 
         return array_values(array_unique(array_filter($candidates)));
+    }
+
+    /**
+     * The shapes a written date takes, each carrying a full four digit year.
+     *
+     * The year is what makes a span safe to cut out of a longer answer: a
+     * phone number does not contain 18xx, 19xx or 20xx between separators, so
+     * removing these leaves a real number whole. Deliberately narrower than
+     * the shapes birthDateCandidates() will read a date from.
+     *
+     * @return array<int, string>
+     */
+    private function birthDatePatterns(): array
+    {
+        return [
+            // 01.01.1992, 01/01/1992, 01-01-1992
+            '/\b\d{1,2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*(?:18|19|20)\d{2}\b/u',
+            // 1992-01-01
+            '/\b(?:18|19|20)\d{2}\s*[.\/-]\s*\d{1,2}\s*[.\/-]\s*\d{1,2}\b/u',
+            // 1 January 1992, 1st Jan 1992
+            '/\b\d{1,2}(?:st|nd|rd|th)?\s+[a-z]+\.?\s+(?:18|19|20)\d{2}\b/iu',
+            // January 1, 1992
+            '/\b[a-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*(?:18|19|20)\d{2}\b/iu',
+        ];
+    }
+
+    /**
+     * The answer with any written date taken out of it.
+     *
+     * Used to keep a date's digits out of a phone number. The span goes
+     * whether or not it reads as a *plausible* birth date - "1 January 2099"
+     * is a date the patient meant as one, and letting its digits fall into the
+     * mobile number would be worse than asking them for the date again.
+     */
+    private function withoutBirthDate(string $value): string
+    {
+        return trim(preg_replace($this->birthDatePatterns(), ' ', $value));
+    }
+
+    /**
+     * Whether the patient appears to have attempted a date at all.
+     *
+     * Tells "they only gave a number" apart from "they gave a date that cannot
+     * be right", so the second case can be met with the date question again
+     * rather than a silent skip.
+     */
+    private function mentionsDate(string $value): bool
+    {
+        foreach ($this->birthDatePatterns() as $pattern) {
+            if (preg_match($pattern, $value) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The mobile number and date of birth inside one answer.
+     *
+     * The patient is asked for both together, so an answer may hold either or
+     * both: "76643421 and 1 January 2002", "my mobile is 76643421", or just
+     * the date. Splitting is all this does - each part is then handed to the
+     * SAME validator it has always gone through, so nothing is accepted here
+     * that would not have been accepted when the two were asked separately.
+     *
+     * @return array{mobile: ?string, birth_date: ?Carbon, tried_date: bool}
+     */
+    private function splitIdentity(string $text): array
+    {
+        return [
+            'mobile' => $this->cleanMobile($text),
+            'birth_date' => $this->parseBirthDate($text),
+            'tried_date' => $this->mentionsDate($text),
+        ];
+    }
+
+    /**
+     * A full name split into the two fields the register API stores.
+     *
+     * cleanName() decides whether this is a name at all - sentences, requests
+     * and pleasantries are refused there exactly as before. This only decides
+     * where to cut: the first word is the given name and everything after it
+     * the surname, so "van der Berg" survives as one surname.
+     *
+     * @return array{first: ?string, last: ?string}
+     */
+    private function splitName(string $text): array
+    {
+        $name = $this->cleanName($text);
+
+        if ($name === null) {
+            return ['first' => null, 'last' => null];
+        }
+
+        $words = preg_split('/\s+/u', $name);
+        $first = array_shift($words);
+
+        return ['first' => $first, 'last' => $words === [] ? null : implode(' ', $words)];
+    }
+
+    /**
+     * What the assistant says when an answer is not a name.
+     *
+     * Repeating the request mid-registration is common. Saying "I didn't catch
+     * that" to someone who simply said "book an appointment" again reads as if
+     * the assistant has forgotten what it is doing.
+     */
+    private function notAName(string $text, string $field): array
+    {
+        if ($this->wantsBooking($text)) {
+            return $this->say("We're already booking that - I just need your " . $field . ' to carry on.');
+        }
+
+        return $this->say("Sorry, I didn't catch that. Could you tell me your " . $field . ' again?');
+    }
+
+    /**
+     * What happens once the mobile number and date of birth are both known.
+     *
+     * Mobile + date of birth is exactly how the register API decides a patient
+     * already exists, so this is where a returning patient is recognised and
+     * spared the details PureMed already holds. Shared by the combined question
+     * and the follow-up one, so identification happens in one place however the
+     * two answers arrived.
+     */
+    private function identifyPatient(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
+    {
+        $existing = $authenticator->authenticate(
+            $state['patient']['mobile_no'],
+            $state['patient']['birth_date']
+        );
+
+        if ($existing) {
+            return $this->resumeExistingPatient($state, $existing, $client);
+        }
+
+        // Nothing to show or cancel if we have never seen this person.
+        if (in_array($state['goal'] ?? 'book', ['cancel', 'list'], true)) {
+            $state['step'] = 'mobile_no';
+            // Both are asked for again, so clear the pair rather than leaving a
+            // date of birth behind that would shorten the question to the
+            // number alone.
+            unset($state['patient']['mobile_no'], $state['patient']['birth_date']);
+
+            return [$this->say("I couldn't find any records for that mobile number and date of birth. Could you check the number for me?", 'error')];
+        }
+
+        // Not a patient the practice holds, so the rest of the details the
+        // register API requires are collected from here on.
+        $state['step'] = $this->nextRegistrationStep('birth_date');
+
+        return [$this->say("Thanks. I'll just need a few details to set you up.")];
     }
 
     private function isPlausibleBirthDate(Carbon $date): bool
