@@ -978,6 +978,23 @@ class ChatController extends Controller
                     return [$this->say('Of course - which of these days would you prefer?')];
                 }
 
+                // "I don't want any of these" turns down the whole list, not one
+                // time in it. Showing the same times again - which is what a
+                // refusal used to do here - answers a question they did not ask.
+                // The day is what is not working, so this is the same place
+                // "another day" goes. The doctor and the appointment type they
+                // already chose are kept.
+                if ($choiceValue === '' && $this->rejectsAllSlots($text)) {
+                    $state['slot'] = null;
+                    $state['slot_window'] = null;
+                    $state['slot_date'] = null;
+                    $state['step'] = 'slot_date';
+                    $state['_handled'] = true;
+                    $state['_no_prompt'] = true;
+
+                    return [$this->say("No problem - none of those, then. Which day would suit you better?")];
+                }
+
                 if ($choiceValue === '' && ($this->wantsSlotList($text) || $this->saidNo('', $text))) {
                     if (preg_match('/\b(other|another|more|else)\b/', $this->normalizeText($text))) {
                         $state['chip_page'] = ($state['chip_page'] ?? 0) + 1;
@@ -4065,6 +4082,33 @@ class ChatController extends Controller
         }
 
         return $dates;
+    }
+
+    /**
+     * Turning down the whole list of times rather than one time in it.
+     *
+     * "not that one" means show me the others; "I don't want any of these"
+     * means none of them work. Both are refusals, so saidNo() cannot separate
+     * them - what does is the "any", "anything" or "none". Called only from the
+     * slot_time step, where that difference decides whether the same list is
+     * worth showing again.
+     *
+     * "I don't want this" and "not this" are deliberately NOT matched: "this"
+     * may well be one particular time, and re-showing the list is the right
+     * answer to that.
+     */
+    private function rejectsAllSlots(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        // A named time or a position is a choice, however it is worded.
+        if ($value === '' || $this->extractTime($text) !== '' || $this->saysPosition($text)) {
+            return false;
+        }
+
+        return preg_match('/\bnone of (these|them|those)\b/u', $value) === 1
+            || preg_match('/\b(dont|do not|don t)\b[^.]{0,20}\b(any|anything|none)\b/u', $value) === 1
+            || preg_match('/\b(any|anything) of (these|them|those)\b/u', $value) === 1;
     }
 
     private function wantsAnotherDay(string $text): bool
