@@ -94,12 +94,44 @@ t('so is the history', in_array('past', $chips($d), true), true);
 echo "\nWITH AN APPOINTMENT: THE CHIP APPEARS AND WORKS\n";
 // Book one, so the rest of this runs against a patient who really does have
 // something to cancel rather than depending on what happens to be on file.
+// Not every doctor and appointment type has free time, and which ones do
+// changes as the practice's roster is used up. Search for a pairing that
+// actually offers a day rather than assuming the first of each does.
+$d = null;
 $reset();
 $say('book an appointment');
 $say('76643421 and 1 January 2002');
-$s = $st();
-$tap('doctor', (string) $s['doctors'][0]['id']);
-$d = $tap('appointment_type', (string) $st()['appointment_types'][0]['id']);
+
+foreach ($st()['doctors'] as $doctor) {
+    $tap('doctor', (string) $doctor['id']);
+
+    foreach ($st()['appointment_types'] as $type) {
+        $try = $tap('appointment_type', (string) $type['id']);
+        if (($try['step'] ?? '') === 'slot_date' && !empty($try['options']['items'])) {
+            $d = $try;
+            break 2;
+        }
+    }
+
+    // Back to the doctor list to try the next one.
+    $reset();
+    $say('book an appointment');
+    $say('76643421 and 1 January 2002');
+}
+if ($d === null) {
+    // Not a failure of the assistant: the practice has no bookable time left
+    // for any doctor, so there is no way to reach a real appointment. Said
+    // loudly rather than counted as a pass, because these checks did NOT run.
+    echo "\n  ***  SKIPPED - the practice has no free days for any doctor.\n";
+    echo "  ***  Everything from here needs a real appointment to exist.\n";
+    echo "  ***  Add roster dates for an upcoming day and re-run.\n";
+    printf("\n  %d passed, %d failed (booking-dependent checks SKIPPED)\n", $ok, $bad);
+
+    return;
+}
+
+t('some doctor and type has free days', true, true);
+
 $d = $tap('slot_date', (string) $d['options']['items'][0]['value']);
 $d = $tap('slot_time', (string) $d['options']['items'][0]['value']);
 $d = $say('yes');
@@ -127,6 +159,15 @@ t('same step either way', $tapped['step'], $typed['step']);
 t('same words either way', $texts($tapped), $texts($typed));
 
 echo "\nTHE CANCELLATION ITSELF IS UNCHANGED\n";
+if (empty($st()['cancellable'])) {
+    // The appointment booked above is gone - another run of this file, or the
+    // practice's own data, took it. Nothing below can be checked without one.
+    echo "  ***  SKIPPED - no appointment left to cancel.\n";
+    printf("\n  %d passed, %d failed (cancellation checks SKIPPED)\n", $ok, $bad);
+
+    return;
+}
+
 $d = $tap('cancel_select', (string) $st()['cancellable'][0]['id']);
 t('it asks before doing anything', $d['step'], 'cancel_confirm');
 t('and warns it cannot be undone', str_contains($texts($d), 'This cannot be undone'), true);
@@ -135,8 +176,21 @@ t('then confirms it is done', str_contains($texts($d), 'has been cancelled'), tr
 t('the held list is emptied', empty($st()['cancellable']), true);
 
 echo "\nA FRESH EMPTY RESPONSE CLEARS A STALE CHIP\n";
-// The patient just cancelled everything. Viewing the list again must re-read
-// from PureMed and drop the chip, not keep offering it from what was held.
+// Cancel whatever else this patient holds, so the empty case can be reached.
+// The count is not assumed: earlier runs of this file, and the practice's own
+// data, both leave appointments behind.
+for ($guard = 0; $guard < 10; $guard++) {
+    $viewList();
+    if (empty($st()['cancellable'])) {
+        break;
+    }
+    $tap('appointments', 'cancel');
+    $tap('cancel_select', (string) $st()['cancellable'][0]['id']);
+    $say('yes');
+}
+
+// Viewing the list again must re-read from PureMed and drop the chip, rather
+// than keep offering it from what was held.
 $d = $viewList();
 t('the practice now returns nothing', count($st()['cancellable'] ?? []), 0);
 t('so the Cancel chip is gone', in_array('cancel', $chips($d), true), false);

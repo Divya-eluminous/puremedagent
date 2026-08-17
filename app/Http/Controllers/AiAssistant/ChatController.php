@@ -4081,6 +4081,29 @@ class ChatController extends Controller
      * "not" on its own is deliberately absent: it appears in requests such as
      * "you have not shown me the slots", which are not rejections.
      */
+    /**
+     * A refusal built out of an agreement word: "it's not right".
+     *
+     * The affirmative matcher sees "right" and nothing else, so without this a
+     * patient who said no had their email stored, their appointment booked or
+     * their booking cancelled.
+     *
+     * Deliberately narrow. The negator has to sit directly in front of the
+     * agreement word, with at most one word between them for "not quite
+     * right". A bare "not" anywhere in the sentence is NOT a refusal and must
+     * never become one: it used to be, and "you haven't shown me the slots"
+     * threw away the appointment the patient had chosen (see wantsSlotList()).
+     *
+     * normalizeText() has already turned "isn't" into "isn t".
+     */
+    private function negatesAgreement(string $value): bool
+    {
+        return preg_match(
+            '/\b(not|isn t|ain t|aint|wasn t|won t)\b(\s+\w+)?\s+\b(right|correct|ok|okay|fine|good|perfect|sure|yes|yeah|yep)\b/',
+            $value
+        ) === 1;
+    }
+
     private function saidNo(string $choiceValue, string $text): bool
     {
         $value = $this->normalizeText($choiceValue !== '' ? $choiceValue : $text);
@@ -4092,6 +4115,20 @@ class ChatController extends Controller
         // An outright "no" is a rejection even if the same sentence goes on to
         // ask for something else. normalizeText turns "don't" into "don t".
         if (preg_match('/\b(no|nope|nah|dont|don t|do not|doesn t|not that|not this|dont want|don t want)\b/', $value) === 1) {
+            return true;
+        }
+
+        // "it's not right" - a refusal made out of an agreement word.
+        if ($this->negatesAgreement($value)) {
+            return true;
+        }
+
+        // The whole answer is the refusal: "wrong", "that's wrong",
+        // "incorrect", "a mistake". Anchored on purpose. "you have taken wrong
+        // time I said 17" also contains "wrong", but it names a new time and
+        // the slot step corrects the booking with it - reading that as a bare
+        // refusal would throw the correction away.
+        if (preg_match('/^(that s |it s |this is |thats )?(a )?(wrong|incorrect|mistake|not right|not correct)$/', $value) === 1) {
             return true;
         }
 
@@ -4115,6 +4152,14 @@ class ChatController extends Controller
         $value = $this->normalizeText($choiceValue !== '' ? $choiceValue : $text);
 
         if ($value === '' || $this->saidNo($choiceValue, $text)) {
+            return false;
+        }
+
+        // saidNo() already refuses these, so this is a second lock on the same
+        // door. It stays because of what is behind the door: this answer books
+        // an appointment, cancels one, or stores the address a confirmation is
+        // sent to, and none of those can be taken back.
+        if ($this->negatesAgreement($value)) {
             return false;
         }
 
