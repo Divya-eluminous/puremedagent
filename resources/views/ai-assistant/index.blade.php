@@ -379,6 +379,9 @@
     var pendingStatus = null;
     // Set when the pending message came from the microphone rather than typing.
     var spokenSubmission = false;
+    // The exact text recognition last put in the box, so a half-heard phrase
+    // can be removed again without ever touching what the patient typed.
+    var micWrote = null;
     // The question currently on screen, so speech can be handled differently
     // while an email is being spelled out.
     var currentStep = 'intent';
@@ -1025,21 +1028,58 @@
             } catch (error) { /* speech is optional - never break the chat */ }
         }
 
+        /**
+         * Is the assistant talking, or about to?
+         *
+         * `queued` counts every utterance from the moment it is handed over
+         * until it finishes, so a whole turn of several messages counts as one
+         * unbroken speaking period. That matters: speechSynthesis.speaking is
+         * false in the gaps BETWEEN utterances, and anything that trusted it
+         * would open the microphone into the middle of the assistant's own
+         * sentence. Muted means there is no sound to capture, so nothing to
+         * wait for.
+         */
+        function isSpeaking() {
+            return enabled && supported && queued > 0;
+        }
+
         /** Run once the assistant has finished speaking (immediately if muted). */
         function whenSilent(callback) {
             if (queued === 0) { callback(); return; }
             idleCallback = callback;
 
-            // Safety net: browsers block speech until the first gesture, and a
-            // blocked utterance never fires onend. Without this, hands-free
-            // listening would wait for a voice that is never coming.
-            window.setTimeout(function () {
-                if (idleCallback !== callback) { return; }
-                if (supported && window.speechSynthesis.speaking) { return; }
+            // Watchdog for the case settle() can never handle: browsers block
+            // speech until the first gesture, and a blocked utterance fires
+            // neither onend nor onerror, so `queued` would never drain and the
+            // microphone would never reopen.
+            //
+            // It polls instead of checking once, because a single check lands
+            // in the gap between two utterances about as often as it lands
+            // after the last one - and `speaking` is false in both. Silence
+            // has to hold across several checks, and `pending` has to be clear
+            // too: that is what is true while utterances are queued but not yet
+            // started, which is exactly the gap a single check misreads.
+            var idleTicks = 0;
+            var poll = window.setInterval(function () {
+                if (idleCallback !== callback) {
+                    window.clearInterval(poll);   // settle() got there first
+
+                    return;
+                }
+
+                if (supported && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+                    idleTicks = 0;
+
+                    return;
+                }
+
+                if (++idleTicks < 3) { return; }
+
+                window.clearInterval(poll);
                 queued = 0;
                 idleCallback = null;
                 callback();
-            }, 1200);
+            }, 200);
         }
 
         if (!supported) {
@@ -1064,6 +1104,7 @@
             speak: speak,
             stop: stop,
             whenSilent: whenSilent,
+            isSpeaking: isSpeaking,
             enable: function () {
                 if (!supported || enabled) { return; }
                 enabled = true;
@@ -1155,6 +1196,16 @@
     }
 
     function startListening() {
+        // The one gate every path to the microphone passes through. Opening it
+        // while the assistant is talking means transcribing the assistant: the
+        // reply "Starting fresh for a new patient" came back as the patient
+        // saying "starting price for a new patient". Guarding here rather than
+        // at each caller means a new caller cannot forget.
+        //
+        // Tapping the microphone during a reply still works: that path cancels
+        // speech first, which empties the queue before this runs.
+        if (voiceOutput.isSpeaking()) { return; }
+
         recognition = new SpeechRecognition();
         recognition.lang = 'en-US';
         recognition.interimResults = true;
@@ -1180,6 +1231,11 @@
                 if (event.results[i].isFinal) { finalText += transcript; } else { interim += transcript; }
             }
             input.value = (finalText + ' ' + interim).trim();
+            // Remembered so a half-heard phrase can be taken back out of the
+            // box if the microphone closes before the turn ends - but only if
+            // it is still exactly what was put there, never something the
+            // patient has typed themselves.
+            micWrote = input.value;
             autoGrow();
             hint.textContent = 'Listening... ' + (interim || finalText);
 
@@ -1214,6 +1270,9 @@
             stopListening(true);
 
             if (spoken) {
+                // A finished answer, not a leftover: stopListening() has just
+                // emptied the box, so put it back for submitTyped() to send.
+                input.value = spoken;
                 unheardInARow = 0;
                 spokenSubmission = true;
                 submitTyped();
@@ -1232,9 +1291,11 @@
                 return;
             }
 
-            window.setTimeout(function () {
-                if (handsFree && !busy && !listening) { startListening(); }
-            }, 500);
+            // Reopening goes through resumeListening() rather than calling
+            // startListening() directly, so this path waits for the assistant
+            // to finish speaking like every other one. It used to check only
+            // `busy`, which is false throughout the reply being read out.
+            window.setTimeout(function () { resumeListening(null); }, 500);
         };
 
         try {
@@ -1247,6 +1308,16 @@
     function stopListening(keepHint) {
         listening = false;
         window.clearTimeout(spellingTimer);
+        // The handlers are unhooked below before stop(), so onend never runs
+        // and never submits what is in the box. A half-heard phrase left there
+        // would be sent as the next answer, and resumeListening() would read it
+        // as the patient typing and stop reopening the microphone at all.
+        // Only removed when it is still exactly what recognition wrote.
+        if (micWrote !== null && input.value === micWrote) {
+            input.value = '';
+            autoGrow();
+        }
+        micWrote = null;
         micBtn.classList.remove('listening');
         micBtn.classList.toggle('armed', handsFree);
 

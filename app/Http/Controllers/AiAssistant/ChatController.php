@@ -846,6 +846,16 @@ class ChatController extends Controller
                     return [$this->say("I'll keep that in mind for the times. First, which doctor would you like to see?")];
                 }
 
+                // "can I change my gender" is a question about themselves, not
+                // a doctor. Without this it reached the name matcher and came
+                // back as "I didn't catch which doctor you meant", which reads
+                // as though the assistant had not listened at all.
+                if ($choiceValue === '' && $this->asksToChangeDetails($text)) {
+                    $state['_handled'] = true;
+
+                    return [$this->say("I can't change your details here, I'm afraid - the practice can update those for you.")];
+                }
+
                 $doctor = $this->matchOption($state['doctors'], $choiceValue, $text);
                 if (!$doctor) {
                     return [$this->say("I didn't catch which doctor you meant. Please pick one from the list.")];
@@ -1842,8 +1852,20 @@ class ChatController extends Controller
             // offering a Cancel button for appointments that are gone.
             $state['cancellable'] = [];
 
-            // Leave the step alone so the patient carries on where they were.
-            return [$this->say("You don't have any upcoming appointments to cancel.")];
+            // The step is left alone deliberately: the patient keeps the
+            // doctor, type, day and time they had already chosen.
+            $replies = [$this->say("You don't have any upcoming appointments to cancel.")];
+
+            // Mid-booking, the step's own question is about to be asked again.
+            // On its own that reads as though the request had been ignored -
+            // "nothing to cancel" followed by "which doctor?" - so say why it
+            // is coming back. At the "anything else?" menu the question already
+            // follows on its own, and a second sentence would only pad it.
+            if (in_array($state['step'], ['doctor', 'appointment_type', 'slot_date', 'slot_time', 'confirm'], true)) {
+                $replies[] = $this->say('We can carry on with the new one, though.');
+            }
+
+            return $replies;
         }
 
         $state['cancellable'] = $appointments;
@@ -4109,6 +4131,35 @@ class ChatController extends Controller
         return preg_match('/\bnone of (these|them|those)\b/u', $value) === 1
             || preg_match('/\b(dont|do not|don t)\b[^.]{0,20}\b(any|anything|none)\b/u', $value) === 1
             || preg_match('/\b(any|anything) of (these|them|those)\b/u', $value) === 1;
+    }
+
+    /**
+     * Asking to change something the practice holds about them.
+     *
+     * The assistant registers a patient once and has no update call - there is
+     * no such endpoint in PureMedApiClient - so this can only ever be answered
+     * honestly, never acted on. Saying so is still far better than the doctor
+     * matcher's "I didn't catch which doctor you meant".
+     *
+     * Both halves are required: a verb that means change AND one of the fields
+     * a patient actually has. "change the time" and "change the day" are about
+     * the appointment and are handled by their own steps, so neither the times
+     * nor the days appear in the second list.
+     */
+    private function asksToChangeDetails(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        return preg_match(
+            '/\b(change|update|correct|edit|amend|fix)\b[^.]{0,14}'
+            . '\b(gender|sex|name|email|e mail|date of birth|birth date|dob'
+            . '|mobile|phone|details|information)\b/u',
+            $value
+        ) === 1;
     }
 
     private function wantsAnotherDay(string $text): bool
