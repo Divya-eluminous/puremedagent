@@ -56,7 +56,10 @@ $reads('W', 'W');
 
 echo "\nWHAT THE RECOGNISER ACTUALLY WRITES\n";
 foreach (['mail' => 'M', 'mail mail' => 'M', 'male male' => 'M',
-    'Mail' => 'M', 'MAIL MAIL' => 'M', 'mails' => 'M', 'maile' => 'M',
+    // The recogniser capitalises at the start of a phrase, and some engines
+    // return the whole transcript upper-cased.
+    'Mail' => 'M', 'MAIL' => 'M', 'Male' => 'M', 'MALE' => 'M',
+    'MAIL MAIL' => 'M', 'mails' => 'M', 'maile' => 'M',
     'mael' => 'M', 'male mail' => 'M',
     'female female' => 'W', 'femail' => 'W', 'femaile' => 'W',
     'Female Female' => 'W'] as $said => $want) {

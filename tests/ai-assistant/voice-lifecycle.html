@@ -1,0 +1,256 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Voice lifecycle harness</title>
+<style>
+  body { font: 13px/1.6 Consolas, monospace; margin: 24px; color: #1a1a1a; }
+  h1 { font: 600 16px/1.4 system-ui, sans-serif; margin: 0 0 4px; }
+  p.lede { font: 13px/1.5 system-ui, sans-serif; color: #555; margin: 0 0 18px; max-width: 62ch; }
+  .ok { color: #17692a; }
+  .fail { color: #b3261e; font-weight: 700; }
+  h2 { font: 600 13px/1.6 system-ui, sans-serif; margin: 16px 0 2px; color: #333; }
+  #sum { margin-top: 18px; padding: 8px 12px; border-left: 3px solid #999; background: #f6f6f6; }
+</style>
+<h1>Voice lifecycle harness</h1>
+<p class="lede">
+  Drives the microphone/speech lifecycle against stubbed browser APIs, so the
+  rule "never open the microphone while the assistant is talking" can be checked
+  without a real microphone or a real voice. Open this file in a browser.
+</p>
+<div id="out"></div>
+<div id="sum"></div>
+<script>
+var pass = 0, fail = 0;
+function log(label, got, want) {
+  var okay = JSON.stringify(got) === JSON.stringify(want);
+  okay ? pass++ : fail++;
+  var d = document.createElement('div');
+  d.className = okay ? 'ok' : 'fail';
+  d.textContent = (okay ? '  OK   ' : '  FAIL ') + label +
+    (okay ? '' : '   got=' + JSON.stringify(got) + ' want=' + JSON.stringify(want));
+  document.getElementById('out').appendChild(d);
+}
+function head(t) {
+  var h = document.createElement('h2');
+  h.textContent = t;
+  document.getElementById('out').appendChild(h);
+}
+
+/* ---------- stub speechSynthesis ----------
+   Utterances finish only when the test says so, so the gap between two of them
+   - the moment the real bug lived in - can be held open and inspected.        */
+function makeSynth() {
+  var queue = [];
+  return {
+    speaking: false,
+    pending: false,
+    speak: function (u) {
+      queue.push(u);
+      this.pending = queue.length > 1;
+      if (queue.length === 1) { this.speaking = true; u.onstart && u.onstart(); }
+    },
+    cancel: function () {
+      queue.length = 0;
+      this.speaking = false;
+      this.pending = false;
+    },
+    /** Finish the current utterance and start the next, as a browser would. */
+    finishOne: function () {
+      var done = queue.shift();
+      this.speaking = false;
+      this.pending = false;
+      done && done.onend && done.onend();
+      if (queue.length) {
+        this.speaking = true;
+        this.pending = queue.length > 1;
+        queue[0].onstart && queue[0].onstart();
+      }
+    },
+    /** The gap a real browser leaves between utterances. */
+    enterGap: function () { this.speaking = false; this.pending = queue.length > 0; },
+    size: function () { return queue.length; }
+  };
+}
+
+/* ---------- the module under test ----------
+   voiceOutput's queue accounting and isSpeaking(), transcribed from
+   resources/views/ai-assistant/index.blade.php.                              */
+function makeVoiceOutput(synth, enabled) {
+  var queued = 0, idleCallback = null, supported = true;
+
+  function settle() {
+    queued = Math.max(0, queued - 1);
+    if (queued === 0 && idleCallback) {
+      var cb = idleCallback; idleCallback = null; cb();
+    }
+  }
+  return {
+    speak: function (text) {
+      if (!enabled || !supported || !text) { return; }
+      var u = { onstart: null, onend: settle, onerror: settle };
+      queued += 1;
+      synth.speak(u);
+    },
+    stop: function () {
+      queued = 0; idleCallback = null; synth.cancel();
+    },
+    isSpeaking: function () { return enabled && supported && queued > 0; },
+    whenSilent: function (callback) {
+      if (queued === 0) { callback(); return; }
+      idleCallback = callback;
+      var idleTicks = 0;
+      var poll = setInterval(function () {
+        if (idleCallback !== callback) { clearInterval(poll); return; }
+        if (supported && (synth.speaking || synth.pending)) { idleTicks = 0; return; }
+        if (++idleTicks < 3) { return; }
+        clearInterval(poll); queued = 0; idleCallback = null; callback();
+      }, 200);
+    },
+    queuedCount: function () { return queued; }
+  };
+}
+
+/** The microphone side: only what the guard depends on. */
+function makeMic(voiceOutput) {
+  var state = { listening: false, hint: '', starts: 0, handsFree: true, busy: false, box: '', micWrote: null };
+  function startListening() {
+    if (voiceOutput.isSpeaking()) { return; }          // THE GUARD
+    state.listening = true; state.starts += 1; state.hint = 'Listening...';
+  }
+  function stopListening() {
+    state.listening = false;
+    if (state.micWrote !== null && state.box === state.micWrote) { state.box = ''; }
+    state.micWrote = null;
+    state.hint = 'Type or tap the microphone to speak.';
+  }
+  function resumeListening() {
+    if (!state.handsFree) { return; }
+    voiceOutput.whenSilent(function () {
+      if (!state.handsFree || state.busy || state.listening) { return; }
+      if (state.box.trim() !== '') { return; }
+      startListening();
+    });
+  }
+  function hearInterim(text) { state.box = text; state.micWrote = text; }
+  function tapMic() { voiceOutput.stop(); stopListening(); startListening(); }
+  return { state: state, startListening: startListening, stopListening: stopListening,
+           resumeListening: resumeListening, hearInterim: hearInterim, tapMic: tapMic };
+}
+
+function scenario(enabled) {
+  var synth = makeSynth();
+  var vo = makeVoiceOutput(synth, enabled !== false);
+  return { synth: synth, vo: vo, mic: makeMic(vo) };
+}
+
+head('THE REPORTED BUG: THREE MESSAGES IN A ROW');
+(function () {
+  var s = scenario();
+  ['Starting fresh for a new patient.', "Hi, I'm your PureMed Assistant.", 'How can I help you today?']
+    .forEach(function (m) { s.vo.speak(m); });
+  log('three utterances are queued', s.vo.queuedCount(), 3);
+  s.mic.resumeListening();
+  log('the microphone stays shut while speaking', s.mic.state.listening, false);
+
+  s.synth.finishOne();
+  log('still shut after the first finishes', s.mic.state.listening, false);
+  s.synth.enterGap();
+  s.mic.startListening();
+  log('and shut in the gap between utterances', s.mic.state.listening, false);
+
+  s.synth.finishOne();
+  s.synth.finishOne();
+  log('the queue has drained', s.vo.queuedCount(), 0);
+  log('only now does it open', s.mic.state.listening, true);
+  log('exactly once', s.mic.state.starts, 1);
+})();
+
+head('THE onend RESTART CANNOT JUMP THE QUEUE');
+(function () {
+  var s = scenario();
+  s.vo.speak('one'); s.vo.speak('two');
+  s.mic.resumeListening();                       // the restart path
+  log('refused while speaking', s.mic.state.listening, false);
+  s.synth.finishOne(); s.synth.finishOne();
+  log('allowed once silent', s.mic.state.listening, true);
+})();
+
+head('MUTED: NOTHING TO WAIT FOR');
+(function () {
+  var s = scenario(false);
+  s.vo.speak('a reply nobody hears');
+  log('nothing is queued when muted', s.vo.queuedCount(), 0);
+  log('isSpeaking stays false', s.vo.isSpeaking(), false);
+  s.mic.resumeListening();
+  log('the microphone opens at once', s.mic.state.listening, true);
+})();
+
+head('TAPPING THE MICROPHONE WHILE THE ASSISTANT TALKS');
+(function () {
+  var s = scenario();
+  s.vo.speak('a long sentence'); s.vo.speak('and another');
+  log('it is speaking', s.vo.isSpeaking(), true);
+  s.mic.tapMic();
+  log('speech is cancelled', s.vo.queuedCount(), 0);
+  log('and listening starts immediately', s.mic.state.listening, true);
+})();
+
+head('CANCELLED SPEECH DOES NOT WEDGE THE MICROPHONE');
+(function () {
+  var s = scenario();
+  s.vo.speak('interrupted'); s.vo.stop();
+  log('the queue is empty', s.vo.queuedCount(), 0);
+  log('and not stuck speaking', s.vo.isSpeaking(), false);
+  s.mic.resumeListening();
+  log('the microphone can open again', s.mic.state.listening, true);
+})();
+
+head('A STALE INTERIM IS TAKEN BACK OUT');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.hearInterim('starting price for a new');
+  log('the box holds the half-heard phrase', s.mic.state.box, 'starting price for a new');
+  s.mic.stopListening();
+  log('closing the microphone clears it', s.mic.state.box, '');
+  s.mic.resumeListening();
+  log('so listening reopens instead of stalling', s.mic.state.listening, true);
+})();
+
+head('TYPED TEXT IS NEVER TOUCHED');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.hearInterim('half heard');
+  s.mic.state.box = 'my mobile is 76643421';      // the patient typed over it
+  s.mic.stopListening();
+  log('what was typed survives', s.mic.state.box, 'my mobile is 76643421');
+  s.mic.resumeListening();
+  log('and listening stays shut while it sits there', s.mic.state.listening, false);
+})();
+
+head('THE INDICATOR ONLY CLAIMS WHAT IS TRUE');
+(function () {
+  var s = scenario();
+  s.vo.speak('talking');
+  s.mic.resumeListening();
+  log('no "Listening..." while speaking', s.mic.state.hint.indexOf('Listening') === 0, false);
+  log('and the flag agrees', s.mic.state.listening, false);
+  s.synth.finishOne();
+  log('"Listening..." only once it is', s.mic.state.hint.indexOf('Listening') === 0, true);
+  log('and the flag agrees', s.mic.state.listening, true);
+})();
+
+head('THE MICROPHONE TURNED OFF BY HAND STAYS OFF');
+(function () {
+  var s = scenario();
+  s.mic.state.handsFree = false;
+  s.vo.speak('a reply');
+  s.synth.finishOne();
+  s.mic.resumeListening();
+  log('silence does not reopen it', s.mic.state.listening, false);
+})();
+
+var sum = document.getElementById('sum');
+sum.textContent = pass + ' passed, ' + fail + ' failed';
+sum.style.borderLeftColor = fail ? '#b3261e' : '#17692a';
+</script>
