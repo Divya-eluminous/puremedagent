@@ -4280,8 +4280,13 @@ class ChatController extends Controller
         $value = trim(preg_replace('/\s+/', ' ', $value));
 
         // People answer with a lead-in far more often than with a bare name.
+        // "full", "complete" and "whole" are here because the question itself
+        // asks for a full name, so answering "my full name is Kritika Sen" is
+        // the most natural thing to do - and without them the whole sentence
+        // reached the word cap below and was turned away as not a name.
         $value = preg_replace(
-            "/^(?:my\s+(?:first\s+|last\s+|sur)?name(?:'s|\s+is)?|i\s*am|i'm|it'?s|this\s+is|call\s+me)\s+/iu",
+            "/^(?:my\s+(?:first\s+|last\s+|sur|full\s+|complete\s+|whole\s+)?name(?:'s|\s+is)?"
+            . "|i\s*am|i'm|it'?s|this\s+is|call\s+me)\s+/iu",
             '',
             $value
         );
@@ -4731,7 +4736,11 @@ class ChatController extends Controller
      */
     private function parseBirthDate(string $value): ?Carbon
     {
-        $value = trim(preg_replace('/\s+/', ' ', $value));
+        // Spacing only, never a rule: what counts as a plausible birth date is
+        // decided below exactly as it was. Without this the year in "april1994"
+        // has no word boundary in front of it, and the guard turns the answer
+        // away before a single format is tried.
+        $value = trim(preg_replace('/\s+/', ' ', $this->spaceAroundMonth($value)));
 
         if (!preg_match('/\b(18|19|20)\d{2}\b/', $value)) {
             return null;
@@ -4800,6 +4809,9 @@ class ChatController extends Controller
     {
         $tidy = function (string $candidate): string {
             $candidate = str_replace(',', ' ', mb_strtolower($candidate));
+            // A month written hard against the day or the year, as speech and
+            // fast typing produce it: "1april 1994".
+            $candidate = $this->spaceAroundMonth($candidate);
             // "1st January 1992" - the suffix is not part of any format.
             $candidate = preg_replace('/\b(\d{1,2})(st|nd|rd|th)\b/u', '$1', $candidate);
 
@@ -4858,9 +4870,36 @@ class ChatController extends Controller
      * is a date the patient meant as one, and letting its digits fall into the
      * mobile number would be worse than asking them for the date again.
      */
+    /**
+     * Put back the space a month name lost.
+     *
+     * "1april 1994" and "1april1994" are what fast typing and speech produce.
+     * Every date pattern expects the day, the month and the year to be
+     * separated, so without those spaces the date is invisible - and an
+     * invisible date does not get taken out of the answer before the phone
+     * number is read from it. "9876543454 and 1april 1994" became the fifteen
+     * digit mobile number 987654345411994, one digit under the limit that
+     * would have rejected it.
+     *
+     * Deliberately anchored on the month names themselves rather than on any
+     * digit meeting any letter: it can only ever fire where a real month sits
+     * against a number, so a time, an email or a phone number cannot be
+     * touched by it.
+     */
+    private function spaceAroundMonth(string $value): string
+    {
+        $months = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+
+        // "1april" -> "1 april"
+        $value = preg_replace('/\b(\d{1,2})(?=(?:' . $months . ')[a-z]*)/iu', '$1 ', $value);
+
+        // "april1994" -> "april 1994"
+        return preg_replace('/\b((?:' . $months . ')[a-z]*)(?=(?:18|19|20)\d{2}\b)/iu', '$1 ', $value);
+    }
+
     private function withoutBirthDate(string $value): string
     {
-        return trim(preg_replace($this->birthDatePatterns(), ' ', $value));
+        return trim(preg_replace($this->birthDatePatterns(), ' ', $this->spaceAroundMonth($value)));
     }
 
     /**
