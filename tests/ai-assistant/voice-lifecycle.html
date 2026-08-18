@@ -111,7 +111,7 @@ function makeVoiceOutput(synth, enabled) {
 
 /** The microphone side: only what the guard depends on. */
 function makeMic(voiceOutput) {
-  var state = { listening: false, hint: '', starts: 0, handsFree: true, busy: false, box: '', micWrote: null };
+  var state = { listening: false, hint: '', starts: 0, handsFree: true, busy: false, box: '', micWrote: null, sent: null, step: 'intent' };
   function startListening() {
     if (voiceOutput.isSpeaking()) { return; }          // THE GUARD
     state.listening = true; state.starts += 1; state.hint = 'Listening...';
@@ -124,6 +124,9 @@ function makeMic(voiceOutput) {
   }
   function resumeListening() {
     if (!state.handsFree) { return; }
+    // A closed conversation does not reopen the microphone. "done" is not in
+    // this list: it asks "anything else?", which expects an answer.
+    if (state.step === 'closed' || state.step === 'cancelled') { return; }
     voiceOutput.whenSilent(function () {
       if (!state.handsFree || state.busy || state.listening) { return; }
       if (state.box.trim() !== '') { return; }
@@ -132,8 +135,27 @@ function makeMic(voiceOutput) {
   }
   function hearInterim(text) { state.box = text; state.micWrote = text; }
   function tapMic() { voiceOutput.stop(); stopListening(); startListening(); }
+
+  /**
+   * A turn being submitted, as send() does it: cancel any speech, close the
+   * microphone, then the assistant replies. `keepStop` false reproduces the
+   * defect - the microphone left open across the reply.
+   */
+  function send(payload, keepStop) {
+    state.sent = payload;
+    voiceOutput.stop();
+    if (keepStop !== false) { stopListening(); }
+    state.busy = true;
+  }
+  function replyDone(step) {
+    state.busy = false;
+    if (step) { state.step = step; }
+    resumeListening();
+  }
+
   return { state: state, startListening: startListening, stopListening: stopListening,
-           resumeListening: resumeListening, hearInterim: hearInterim, tapMic: tapMic };
+           resumeListening: resumeListening, hearInterim: hearInterim, tapMic: tapMic,
+           send: send, replyDone: replyDone };
 }
 
 function scenario(enabled) {
@@ -248,6 +270,167 @@ head('THE MICROPHONE TURNED OFF BY HAND STAYS OFF');
   s.synth.finishOne();
   s.mic.resumeListening();
   log('silence does not reopen it', s.mic.state.listening, false);
+})();
+
+head('SUBMITTING A TURN CLOSES THE MICROPHONE');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  log('the microphone is open', s.mic.state.listening, true);
+  var startsBefore = s.mic.state.starts;
+
+  s.mic.send({ choice: { type: 'slot_time', value: '06:10' } });
+  log('submitting closes it', s.mic.state.listening, false);
+
+  s.vo.speak('So that is Baby-TV with Dr Albert Munnar.');
+  s.vo.speak('On the 25th of August at ten past six in the morning.');
+  s.vo.speak('Shall I book it?');
+  log('nothing reopened during the reply', s.mic.state.starts, startsBefore);
+  log('and it is still shut', s.mic.state.listening, false);
+})();
+
+head('THREE UTTERANCES, NOTHING TRANSCRIBED');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ text: '06:10' });
+  var startsBefore = s.mic.state.starts;
+
+  s.vo.speak('one'); s.vo.speak('two'); s.vo.speak('three');
+  s.mic.replyDone();                       // resumeListening waits for silence
+
+  s.synth.finishOne();
+  log('shut after the first utterance', s.mic.state.listening, false);
+  s.synth.enterGap();
+  log('shut in the gap', s.mic.state.listening, false);
+  s.synth.finishOne();
+  log('shut after the second', s.mic.state.listening, false);
+  s.synth.finishOne();
+  log('open only after the last', s.mic.state.listening, true);
+  log('and opened exactly once', s.mic.state.starts, startsBefore + 1);
+  log('with nothing captured from the assistant', s.mic.state.box, '');
+})();
+
+head('A CHIP TAP WITH THE MICROPHONE OPEN');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ choice: { type: 'slot_time', value: '06:10' } });
+  log('the chip value is what was sent', s.mic.state.sent.choice.value, '06:10');
+  log('and the microphone closed', s.mic.state.listening, false);
+  s.vo.speak('So that is Baby-TV.');
+  log('the reply is not transcribed', s.mic.state.box, '');
+})();
+
+head('A TYPED SUBMIT KEEPS THE TEXT EXACTLY');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  // submitTyped() reads input.value into `text` and empties the box BEFORE
+  // calling send(), so the payload is already built by the time the
+  // microphone is closed.
+  var typed = 'my mobile is 76643421';
+  s.mic.state.box = typed;
+  var payload = { text: typed, source: 'text' };
+  s.mic.state.box = '';
+  s.mic.send(payload);
+  log('the typed text survives', s.mic.state.sent.text, 'my mobile is 76643421');
+  log('and the microphone closed', s.mic.state.listening, false);
+})();
+
+head('A STALE INTERIM AT SUBMIT DOES NOT REACH THE PAYLOAD');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.hearInterim('so that is baby TV without water');
+  var payload = { choice: { type: 'slot_time', value: '06:10' } };
+  s.mic.send(payload);
+  log('the half-heard phrase is cleared', s.mic.state.box, '');
+  log('and never became the payload', s.mic.state.sent.choice.value, '06:10');
+  log('nor leaked into a text field', s.mic.state.sent.text === undefined, true);
+})();
+
+head('NEGATIVE CONTROL: WITHOUT THE CLOSE, THE ASSISTANT IS HEARD');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ choice: { type: 'slot_time', value: '06:10' } }, false);   // no stopListening()
+  log('the microphone is still open - the defect', s.mic.state.listening, true);
+  // Which is exactly how the assistant's own words became an answer.
+  s.mic.hearInterim('so that is baby TV without water on the 25th August');
+  log('and the reply lands in the box', s.mic.state.box.length > 0, true);
+})();
+
+head('SAYING GOODBYE DOES NOT LEAVE THE MICROPHONE ON');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ text: 'no' });                       // "anything else?" -> "no"
+  var startsBefore = s.mic.state.starts;
+
+  s.vo.speak("You're welcome, Testing. Have a great day!");
+  s.mic.replyDone('closed');
+  s.synth.finishOne();                              // the goodbye finishes
+
+  log('the microphone stays shut', s.mic.state.listening, false);
+  log('and was never reopened', s.mic.state.starts, startsBefore);
+  log('the hint does not claim to be listening',
+      s.mic.state.hint.indexOf('Listening') === 0, false);
+})();
+
+head('NOR AFTER A CANCELLATION IS CLOSED');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ text: 'no thanks' });
+  var startsBefore = s.mic.state.starts;
+  s.vo.speak('Done - your appointment has been cancelled.');
+  s.mic.replyDone('cancelled');
+  s.synth.finishOne();
+  log('the microphone stays shut', s.mic.state.listening, false);
+  log('and was never reopened', s.mic.state.starts, startsBefore);
+})();
+
+head('BUT AN OPEN QUESTION STILL LISTENS');
+(function () {
+  var s = scenario();
+  s.mic.startListening();
+  s.mic.send({ text: 'yes' });
+  s.vo.speak('All done! Your appointment is confirmed.');
+  s.vo.speak('Is there anything else I can help you with?');
+  s.mic.replyDone('done');                          // "done" asks a question
+  s.synth.finishOne(); s.synth.finishOne();
+  log('"done" reopens, because it asked something', s.mic.state.listening, true);
+
+  var t = scenario();
+  t.mic.startListening();
+  t.mic.send({ text: '76643421' });
+  t.vo.speak('Which doctor would you like to see?');
+  t.mic.replyDone('doctor');
+  t.synth.finishOne();
+  log('and so does an ordinary step', t.mic.state.listening, true);
+})();
+
+head('AFTER GOODBYE THE BUTTON STILL WORKS');
+(function () {
+  var s = scenario();
+  s.mic.state.step = 'closed';
+  s.mic.resumeListening();
+  log('nothing reopens on its own', s.mic.state.listening, false);
+  // Tapping is an explicit request, and goes straight to startListening().
+  s.mic.tapMic();
+  log('but a tap still opens it', s.mic.state.listening, true);
+})();
+
+head('NEGATIVE CONTROL: WITHOUT THE GUARD, GOODBYE STILL LISTENS');
+(function () {
+  var s = scenario();
+  s.mic.state.step = 'closed';
+  s.vo.speak("You're welcome. Have a great day!");
+  // resumeListening() without the step check is just whenSilent + open.
+  s.vo.whenSilent(function () { s.mic.startListening(); });
+  s.synth.finishOne();
+  log('it would reopen after the goodbye', s.mic.state.listening, true);
 })();
 
 var sum = document.getElementById('sum');
