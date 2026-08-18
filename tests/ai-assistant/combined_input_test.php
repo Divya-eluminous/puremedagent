@@ -80,6 +80,55 @@ foreach ([
         [$r['mobile'], $r['date']], ['76643421', '01.01.2002']);
 }
 
+echo "\nA MONTH WITH NO SPACE AROUND IT\n";
+// "1april 1994" is what fast typing and speech produce. Every date pattern
+// wants the day, month and year separated, so without the space the date was
+// invisible - and an invisible date is not taken out of the answer before the
+// phone number is read from it. The reported result was the fifteen digit
+// mobile 987654345411994, one digit under the length that would have refused
+// it, with the date lost as well.
+foreach ([
+    '9876543454 and date of birth is 1april 1994',
+    '9876543454 and 1april 1994',
+    '9876543454 and 1april1994',
+    '9876543454, 1april1994',
+    'my mobile is 9876543454 and my dob is 1april1994',
+] as $said) {
+    $r = $split($said);
+    t('"' . mb_strimwidth($said, 0, 44, '...') . '"',
+        [$r['mobile'], $r['date']], ['9876543454', '01.04.1994']);
+}
+
+// The exact assertion the defect calls for: the fused value must never be what
+// cleanMobile() returns, and the date must be gone before it is asked.
+t('the fused number is never produced',
+    $call('cleanMobile', '9876543454 and date of birth is 1april 1994'), '9876543454');
+t('and no year is left for it to read',
+    str_contains($call('withoutBirthDate', '9876543454 and date of birth is 1april 1994'), '1994'), false);
+t('the date alone still parses without its space',
+    $call('parseBirthDate', '1april1994')->format('Y-m-d'), '1994-04-01');
+t('and is not mistaken for a number', $call('cleanMobile', '1april1994'), null);
+
+// Every month, so this is not an April-only repair.
+foreach (['5jan 1990' => '05.01.1990', '12feb 1988' => '12.02.1988',
+    '3mar1975' => '03.03.1975', '9jun 2001' => '09.06.2001',
+    '21sep1999' => '21.09.1999', '30dec 1980' => '30.12.1980'] as $said => $want) {
+    $d = $call('parseBirthDate', (string) $said);
+    t('"' . $said . '"', $d ? $d->format('d.m.Y') : null, $want);
+}
+
+echo "\nSPACING A MONTH CANNOT REACH ANYTHING ELSE\n";
+// It only fires where a real month name meets a number, so times, phone
+// numbers and addresses are left exactly as they are.
+t('a time is untouched', $call('spaceAroundMonth', '06:10'), '06:10');
+t('an evening time too', $call('spaceAroundMonth', '17:00'), '17:00');
+t('a phone number is untouched', $call('spaceAroundMonth', '0664 123 4567'), '0664 123 4567');
+t('one containing a year is untouched', $call('spaceAroundMonth', '20021234'), '20021234');
+t('an email is untouched', $call('spaceAroundMonth', 'john.smith@gmail.com'), 'john.smith@gmail.com');
+t('a spaced date is left as it is', $call('spaceAroundMonth', '1 april 1994'), '1 april 1994');
+t('and so is a numeric one', $call('spaceAroundMonth', '01.04.1994'), '01.04.1994');
+
+
 echo "\nONE VALUE ONLY\n";
 $r = $split('76643421');
 t('a bare mobile gives the mobile', $r['mobile'], '76643421');
@@ -140,6 +189,41 @@ foreach ([
     $p = $call('splitName', $said);
     t('"' . $said . '"', [$p['first'], $p['last']], $expected);
 }
+
+echo "\nTHE LEAD-IN PEOPLE ACTUALLY USE\n";
+// The question is "May I know your full name?", so answering "my full name is
+// Kritika Sen" is the natural thing to do - and it was the one phrasing the
+// lead-in stripper did not know, so the whole sentence reached the word cap
+// and was turned away as not a name.
+foreach ([
+    'my full name is Kritika Sen',
+    'my complete name is Kritika Sen',
+    'my whole name is Kritika Sen',
+    'My Full Name Is Kritika Sen',
+    'my name is Kritika Sen',
+    'Kritika Sen',
+] as $said) {
+    $p = $call('splitName', $said);
+    t('"' . $said . '"', [$p['first'], $p['last']], ['Kritika', 'Sen']);
+}
+
+// The lead-in comes off without taking anything of the name with it.
+$p = $call('splitName', 'my full name is Anne-Marie Fischer');
+t('a hyphen survives the lead-in', [$p['first'], $p['last']], ['Anne-Marie', 'Fischer']);
+$p = $call('splitName', "my full name is Sean O'Brien");
+t('an apostrophe survives it', [$p['first'], $p['last']], ['Sean', "O'Brien"]);
+$p = $call('splitName', 'my full name is Jan van der Berg');
+t('and a surname of three parts', [$p['first'], $p['last']], ['Jan', 'Van Der Berg']);
+$p = $call('splitName', 'my full name is Kritika');
+t('one name still leaves the surname outstanding', [$p['first'], $p['last']], ['Kritika', null]);
+
+// A lead-in must not become a way to slip a command past the name check.
+foreach (['my full name is book an appointment',
+    'my complete name is cancel my appointment',
+    'my whole name is yes'] as $said) {
+    t('"' . $said . '" is still refused', $call('splitName', $said)['first'], null);
+}
+
 
 echo "\nONE NAME ONLY\n";
 $p = $call('splitName', 'Meera');
