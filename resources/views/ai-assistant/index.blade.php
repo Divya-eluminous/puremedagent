@@ -746,6 +746,20 @@
     function send(payload, endpoint) {
         if (busy) { return; }
         voiceOutput.stop();
+
+        // The patient's turn is over, so the microphone closes with it. Left
+        // open it spends the assistant's entire reply transcribing it: tapping
+        // a time chip while hands-free was listening sent back "so that is baby
+        // TV without water on the 25th August at 6:10 in the morning" - the
+        // assistant's own confirmation, misheard, submitted as an answer.
+        //
+        // Safe here because every caller has already built its payload: the
+        // chip passes a value, and submitTyped() has read input.value into
+        // `text` and emptied the box before calling this. Moving it earlier
+        // would let stopListening()'s stale-interim clean-up empty the box
+        // before the typed text had been captured.
+        stopListening();
+
         clearCards();
         setBusy(true);
 
@@ -1015,6 +1029,12 @@
         function speak(text) {
             if (!enabled || !supported || !text) { return; }
 
+            // Nothing should be listening by the time the assistant talks, but
+            // if anything still is, close it rather than transcribe ourselves.
+            // stopListening() is a function declaration further down this same
+            // scope, so hoisting makes it callable from here.
+            if (listening) { stopListening(true); }
+
             try {
                 var utterance = new SpeechSynthesisUtterance(String(text));
                 utterance.lang = 'en-US';
@@ -1177,6 +1197,14 @@
     function resumeListening(data) {
         if (!handsFree || !speechSupported) { return; }
         if (data && data.input && data.input.enabled === false) { return; }
+
+        // The conversation has been said goodbye to. The patient can still type,
+        // and the microphone button is still one tap away, but nothing should
+        // sit listening to the room after "Have a great day". `done` is not
+        // here on purpose: it asks "anything else?", which expects an answer.
+        // currentStep is set from the reply just above this call, so it is
+        // already the step the patient has landed on.
+        if (currentStep === 'closed' || currentStep === 'cancelled') { return; }
 
         voiceOutput.whenSilent(function () {
             if (!handsFree || busy || listening) { return; }
