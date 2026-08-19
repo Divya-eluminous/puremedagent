@@ -1300,7 +1300,12 @@ class ChatController extends Controller
                 // nothing is re-judged here. Saying "you have no upcoming
                 // appointments" and then offering to cancel one read as a bug
                 // to the patient, and it was one.
-                $items = [['value' => 'book', 'title' => 'Book an appointment']];
+                // The appointments themselves come first, so "you have 2" is
+                // followed by both of them rather than by a menu. They are
+                // read-only; the choices below are what can be acted on.
+                $items = $this->appointmentRowCards($state['appointment_list_cards'] ?? []);
+
+                $items[] = ['value' => 'book', 'title' => 'Book an appointment'];
 
                 if (!empty($state['cancellable'])) {
                     $items[] = ['value' => 'cancel', 'title' => 'Cancel an appointment'];
@@ -1901,6 +1906,7 @@ class ChatController extends Controller
 
         if (empty($appointments)) {
             $state['appointment_list'] = [];
+            $state['appointment_list_cards'] = [];
             // Same response, same list: nothing to show is nothing to cancel.
             $state['cancellable'] = [];
 
@@ -1909,6 +1915,10 @@ class ChatController extends Controller
 
         $state['cancellable'] = $appointments;
         $state['appointment_list'] = $this->appointmentRows($appointments);
+        // What the prompt lists back. The summary card these rows were built
+        // for is never rendered, so the appointments are shown the way the
+        // cancel step already shows them.
+        $state['appointment_list_cards'] = $appointments;
         // Kept for follow-up questions about this same list.
         $state['appointments_context'] = $appointments;
         // The next one is named below, so that is what has been discussed.
@@ -1943,6 +1953,7 @@ class ChatController extends Controller
 
         if (empty($past)) {
             $state['appointment_list'] = [];
+            $state['appointment_list_cards'] = [];
 
             return [$this->say("I couldn't find any past appointments on your record.")];
         }
@@ -1950,6 +1961,9 @@ class ChatController extends Controller
         // Most recent first reads better than oldest first.
         $past = array_reverse($past);
         $state['appointment_list'] = $this->appointmentRows($past);
+        // Listed back for the same reason the upcoming ones are: a count on
+        // its own is not an answer to "show me my appointments".
+        $state['appointment_list_cards'] = $past;
 
         return [$this->say('You have had ' . count($past) . ' '
             . (count($past) === 1 ? 'appointment' : 'appointments') . ' with us before.')];
@@ -2532,6 +2546,23 @@ class ChatController extends Controller
             'evening' => $minutes >= 17 * 60 && $minutes <= 21 * 60 + 59,
             default => true,
         };
+    }
+
+    /**
+     * The same appointments the cancel step lists, shown only to be read.
+     *
+     * "You have 2 upcoming appointments" followed by one of them read out is
+     * not a list. The cancel step already renders every appointment clearly,
+     * so viewing borrows that presentation rather than inventing another - the
+     * same appointment then looks the same wherever the patient meets it.
+     * Marked read-only: tapping your own appointment must not start anything.
+     *
+     * @return array<int, array>
+     */
+    private function appointmentRowCards(array $appointments): array
+    {
+        return array_map(fn ($card) => $card + ['readonly' => true],
+            $this->appointmentCards($appointments));
     }
 
     private function appointmentCards(array $appointments): array
@@ -5345,6 +5376,8 @@ class ChatController extends Controller
             // cancellation is confirmed first, then a new time is chosen.
             'rebook_after_cancel' => false,
             'appointment_list' => [],
+            // The same appointments, shaped as the rows the prompt lists back.
+            'appointment_list_cards' => [],
             // The appointments just listed, kept so follow-up questions - "when
             // is the second one?" - are answered from the real PureMed data
             // rather than asked for again. Cleared when the patient moves on to

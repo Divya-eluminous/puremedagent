@@ -223,6 +223,16 @@
 
     .pm-card.more { border-style: dashed; color: #64748b; }
 
+    /* An appointment shown for reading. Deliberately not a button: no hover,
+       no pointer, and a calmer border than the choices beside it. */
+    .pm-card.listed {
+        cursor: default;
+        background: #f8fbff;
+        border-color: #dbe7f6;
+        color: #33507a;
+    }
+    .pm-card.listed b { font-weight: 600; }
+
     /* Thinking / narration line */
     .pm-status {
         display: flex; align-items: center; gap: 9px;
@@ -607,6 +617,26 @@
         wrap.className = 'pm-cards' + (options.type === 'slot_time' ? ' times' : '');
 
         options.items.forEach(function (item) {
+            // A listed appointment is there to be read, not chosen. It is
+            // rendered as a plain element rather than a button so it cannot be
+            // tapped into a flow the patient never asked for - tapping one of
+            // their own appointments should never begin a cancellation.
+            if (item.readonly) {
+                var row = document.createElement('div');
+                row.className = 'pm-card listed';
+                var rt = document.createElement('b');
+                rt.textContent = item.title;
+                row.appendChild(rt);
+                if (item.subtitle) {
+                    var rs = document.createElement('span');
+                    rs.textContent = item.subtitle;
+                    row.appendChild(rs);
+                }
+                wrap.appendChild(row);
+
+                return;
+            }
+
             var chip = document.createElement('button');
             chip.type = 'button';
             chip.className = 'pm-card' + (item.value === '__more__' ? ' more' : '');
