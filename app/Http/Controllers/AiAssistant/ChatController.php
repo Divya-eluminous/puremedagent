@@ -4734,6 +4734,28 @@ class ChatController extends Controller
      * A four digit year is required - "5 April" alone is ambiguous and used to
      * silently register patients with age 0.
      */
+    /**
+     * Does this text name a day and a month of its own?
+     *
+     * The guard for the last-resort parse. Carbon defaults anything absent to
+     * today's values, so a year on its own silently becomes a full date. Only
+     * two shapes count: numbers separated the way a date is written, or a
+     * number sitting beside a month name.
+     */
+    private function carriesDayAndMonth(string $candidate): bool
+    {
+        // 5/12, 05.12, 5-12 - two numbers written as a date.
+        if (preg_match('/\d{1,2}\s*[.\/-]\s*\d{1,2}/u', $candidate) === 1) {
+            return true;
+        }
+
+        // "5 december" or "december 5" - a day beside a month name.
+        $months = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+
+        return preg_match('/\b\d{1,2}\b[^0-9]{0,12}\b(?:' . $months . ')/iu', $candidate) === 1
+            || preg_match('/\b(?:' . $months . ')[a-z]*\b[^0-9]{0,12}\b\d{1,2}\b/iu', $candidate) === 1;
+    }
+
     private function parseBirthDate(string $value): ?Carbon
     {
         // Spacing only, never a rule: what counts as a plausible birth date is
@@ -4769,6 +4791,15 @@ class ChatController extends Controller
         // Last resort, and only on a candidate rather than the whole sentence:
         // Carbon happily reads a stray number out of surrounding words.
         foreach ($this->birthDateCandidates($value) as $candidate) {
+            // Carbon fills in whatever the text leaves out, and what it fills
+            // in is TODAY. A bare "1990" came back as the 19th of August 1990
+            // on the 19th of August - a date of birth the patient never gave,
+            // stored without a word. Nothing here is trustworthy unless the
+            // patient supplied a day and a month themselves.
+            if (!$this->carriesDayAndMonth($candidate)) {
+                continue;
+            }
+
             try {
                 $date = Carbon::parse($candidate);
             } catch (\Throwable $exception) {
