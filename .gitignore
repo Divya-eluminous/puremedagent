@@ -32,3 +32,6 @@ composer.json
 !/tests/ai-assistant/
 /usertesting
 /stubs
+/docs/
+/tests/
+/test-results/
