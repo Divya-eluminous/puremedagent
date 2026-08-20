@@ -176,6 +176,17 @@ class ChatController extends Controller
             } else {
                 $replies[] = $this->say("Welcome back. Let's pick up where we left off.");
             }
+
+            // Resuming on the appointment list means re-reading it, not
+            // replaying it. What is in the session was true when it was
+            // written; the practice may have cancelled or booked something
+            // since, on another device or at the desk. PureMed answers, and
+            // nothing here judges the reply - loadAppointmentList() stores
+            // whatever get-appointment returns, exactly as it does when the
+            // patient asks for the list themselves.
+            if ($state['step'] === 'appointments' && $state['patient_id'] && $state['token']) {
+                $replies = array_merge($replies, $this->loadAppointmentList($state, $client));
+            }
         } else {
             $stateBefore = $state;
             $replies = $this->handleAnswer($text, $choiceValue, $source, $state, $client, $authenticator);
@@ -2229,6 +2240,14 @@ class ChatController extends Controller
 
         $state['cancellable'] = [];
         $state['cancel_target'] = null;
+        // The viewing list was read BEFORE this cancellation, so it still holds
+        // the appointment that has just gone. Left behind, a page reload
+        // rendered it again from the session and the cancelled appointment came
+        // back as though it were still booked.
+        $state['appointment_list'] = [];
+        $state['appointment_list_cards'] = [];
+        $state['appointments_context'] = [];
+        $state['discussed_appointment'] = 0;
         // Cancelling can make a patient eligible again, so the window has to be
         // asked for afresh rather than remembered from before.
         $state['booking_window'] = null;
