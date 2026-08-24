@@ -76,6 +76,22 @@ return [
     |
     */
     'default_country_code' => env('PUREMED_DEFAULT_COUNTRY_CODE', '0043'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Verifying a new patient
+    |--------------------------------------------------------------------------
+    |
+    | A code is sent before a patient the practice has never seen is created.
+    | Five minutes matches what the app's own OTP allows. The limits are the
+    | assistant's own: a four digit code with unlimited guesses is not a check
+    | at all, and an unattended tab must not be able to spend the practice's
+    | SMS credit.
+    |
+    */
+    'otp_ttl_minutes' => (int) env('AI_ASSISTANT_OTP_TTL', 5),
+    'otp_max_attempts' => (int) env('AI_ASSISTANT_OTP_ATTEMPTS', 3),
+    'otp_max_resends' => (int) env('AI_ASSISTANT_OTP_RESENDS', 2),
     'default_country' => env('PUREMED_DEFAULT_COUNTRY', 'Austria'),
     'default_postal_code' => env('PUREMED_DEFAULT_POSTAL_CODE', '1010'),
     'login_type' => env('PUREMED_LOGIN_TYPE', 'app'),
