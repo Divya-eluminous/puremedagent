@@ -5,6 +5,7 @@ namespace App\Http\Controllers\AiAssistant;
 use App\Http\Controllers\Controller;
 use App\Services\AiAssistant\NluManager;
 use App\Services\AiAssistant\PatientAuthenticator;
+use App\Services\AiAssistant\OtpService;
 use App\Services\AiAssistant\PureMedApiClient;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -39,8 +40,9 @@ class ChatController extends Controller
      * 1: first name -> last name -> mobile -> date of birth -> email -> gender
      * 2: mobile -> date of birth, then registration only if unrecognised
      * 3: mobile and date of birth in one question, full name in one question
+     * 4: a new patient verifies a code before anything about them is created
      */
-    private const FLOW_VERSION = 3;
+    private const FLOW_VERSION = 4;
 
     /**
      * Where the one-turn undo snapshot lives.
@@ -104,9 +106,13 @@ class ChatController extends Controller
     private const REGISTRATION_STEPS = [
         'mobile_no',
         'birth_date',
+        // The email comes before the name so the verification code has
+        // somewhere to go besides the mobile: a patient whose SMS does not
+        // arrive can read the same code in their inbox. This is also the order
+        // the practice's own web booking uses for someone it does not know.
+        'email',
         'first_name',
         'last_name',
-        'email',
         'gender',
     ];
 
@@ -139,7 +145,8 @@ class ChatController extends Controller
         Request $request,
         PureMedApiClient $client,
         PatientAuthenticator $authenticator,
-        NluManager $grok
+        NluManager $grok,
+        OtpService $otp
     ): JsonResponse {
         $request->validate([
             'text' => ['nullable', 'string', 'max:500'],
@@ -189,7 +196,7 @@ class ChatController extends Controller
             }
         } else {
             $stateBefore = $state;
-            $replies = $this->handleAnswer($text, $choiceValue, $source, $state, $client, $authenticator);
+            $replies = $this->handleAnswer($text, $choiceValue, $source, $state, $client, $authenticator, $otp);
 
             // The deterministic matcher above is the primary path and has just
             // failed to move the conversation on. Ask Grok what the sentence
@@ -229,7 +236,7 @@ class ChatController extends Controller
                     $before = $state['step'];
                     $replies = array_merge(
                         $replies,
-                        $this->handleAnswer($retry, '', $source, $state, $client, $authenticator)
+                        $this->handleAnswer($retry, '', $source, $state, $client, $authenticator, $otp)
                     );
 
                     // Stop as soon as a follow-up stops making progress.
@@ -317,7 +324,8 @@ class ChatController extends Controller
         Request $request,
         PureMedApiClient $client,
         PatientAuthenticator $authenticator,
-        NluManager $grok
+        NluManager $grok,
+        OtpService $otp
     ): JsonResponse {
         $request->validate([
             'text' => ['required', 'string', 'max:500'],
@@ -355,7 +363,7 @@ class ChatController extends Controller
 
         // Deliberately the same path as any other message. Nothing about
         // matching, NLU, availability or booking behaves differently here.
-        return $this->converse($request, $client, $authenticator, $grok);
+        return $this->converse($request, $client, $authenticator, $grok, $otp);
     }
 
     private function editRefused(string $message): JsonResponse
@@ -437,8 +445,14 @@ class ChatController extends Controller
      *
      * @return array<int, array> assistant messages to show before the next question
      */
-    private function handleAnswer(string $text, string $choiceValue, string $source, array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
+    private function handleAnswer(string $text, string $choiceValue, string $source, array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator, ?OtpService $otp = null): array
     {
+        // Optional so the many callers that only exercise the conversation can
+        // stay as they are. Nothing is weakened by the default: the code is
+        // required at the point the patient is CREATED, in
+        // registerAndLoadDoctors(), not by whichever step happens to be next.
+        $otp = $otp ?: app(OtpService::class);
+
         $text = trim($text);
 
         if ($text === '' && $choiceValue === '') {
@@ -805,18 +819,22 @@ class ChatController extends Controller
                 }
 
                 $state['patient']['email'] = $capture['email'];
-                $state['step'] = 'gender';
 
-                return [$this->say('Thanks, I have ' . $capture['email'] . '.')];
+                return array_merge(
+                    [$this->say('Thanks, I have ' . $capture['email'] . '.')],
+                    $this->sendVerificationCode($state, $otp)
+                );
 
             case 'email_confirm':
                 if ($this->saidYes($choiceValue, $text)) {
                     $state['patient']['email'] = $state['pending_email'];
                     $state['pending_email'] = null;
                     $state['pending_email_heard'] = null;
-                    $state['step'] = 'gender';
 
-                    return [$this->say('Great, thank you.')];
+                    return array_merge(
+                        [$this->say('Great, thank you.')],
+                        $this->sendVerificationCode($state, $otp)
+                    );
                 }
 
                 // They may simply say it again rather than answer yes or no.
@@ -835,6 +853,46 @@ class ChatController extends Controller
                 $state['step'] = 'email';
 
                 return [$this->say("No problem - email addresses are hard to hear correctly. Could you type it in instead?", 'focus')];
+
+
+            case 'otp_verify':
+                // Only a new patient is ever here, and nothing about them has
+                // been created yet. The code is checked against the practice's
+                // own patients_otp table - the same place the web booking flow
+                // verifies someone it has no record for.
+                $entered = preg_replace('/\D+/', '', $choiceValue !== '' ? $choiceValue : $text);
+
+                if ($this->wantsAnotherCode($text)) {
+                    return $this->resendVerificationCode($state, $otp);
+                }
+
+                if ($entered === '') {
+                    return [$this->say('Could you read me the code? It is four digits.')];
+                }
+
+                if ($otp->verify($entered, $state['patient']['mobile_no'], $state['patient']['birth_date'])) {
+                    // Remembered against the number it was proved for, so a
+                    // later change of mobile cannot inherit this verification.
+                    $state['otp_verified'] = true;
+                    $state['otp_verified_mobile'] = $state['patient']['mobile_no'];
+                    $state['otp_attempts'] = 0;
+                    $state['step'] = 'first_name';
+
+                    return [$this->say('Thank you - that is verified.')];
+                }
+
+                $state['otp_attempts'] = (int) ($state['otp_attempts'] ?? 0) + 1;
+
+                if ($state['otp_attempts'] >= (int) config('ai-assistant.otp_max_attempts', 3)) {
+                    // Spent. The code is dropped rather than left to be guessed
+                    // at, and a fresh one has to be asked for.
+                    $otp->forget($state['patient']['mobile_no'], $state['patient']['birth_date']);
+                    $state['otp_attempts'] = 0;
+
+                    return [$this->say("That code is not right, and I have to stop there for safety. Say \"send it again\" and I will send you a new one.", 'error')];
+                }
+
+                return [$this->say("That code is not right. Could you check it and read it to me again?", 'error')];
 
             case 'gender':
                 $gender = $this->normalizeGender($choiceValue !== '' ? $choiceValue : $text);
@@ -1385,6 +1443,18 @@ class ChatController extends Controller
                     'input' => $this->input(),
                 ];
 
+            case 'otp_verify':
+                return [
+                    'text' => 'Please read me the four digit code.',
+                    'input' => $this->input('Enter the 4-digit code'),
+                ];
+
+            case 'otp_failed':
+                return [
+                    'text' => 'Please call the practice and they will book this for you.',
+                    'input' => $this->input(),
+                ];
+
             case 'gender':
                 return [
                     'text' => 'Last one - are you male or female?',
@@ -1563,6 +1633,17 @@ class ChatController extends Controller
 
     private function registerAndLoadDoctors(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
     {
+        // The gate, and it is here rather than on a step for a reason: a step
+        // is a value in the session, and a session is something a caller can
+        // try to move. Creating the patient is the thing that must not happen
+        // unverified, so this is where it is checked. Forcing the conversation
+        // straight to the name question reaches exactly this line and stops.
+        if (!$this->verifiedForRegistration($state)) {
+            $state['step'] = 'otp_verify';
+
+            return [$this->say('Before I set you up, please read me the four digit code I sent you.', 'error')];
+        }
+
         $patient = $state['patient'];
         $birthDate = Carbon::parse($patient['birth_date']);
 
@@ -5070,6 +5151,92 @@ class ChatController extends Controller
      * and the follow-up one, so identification happens in one place however the
      * two answers arrived.
      */
+    /**
+     * Send a new patient the code that has to be confirmed before they exist.
+     *
+     * Both channels are tried for the same code, so an SMS that never arrives
+     * is not the end of the road - the same digits are in their inbox. What
+     * the patient is told names only the channel that actually worked: sending
+     * them to an inbox nothing reached is worse than saying nothing.
+     */
+    private function sendVerificationCode(array &$state, OtpService $otp): array
+    {
+        $mobile = (string) ($state['patient']['mobile_no'] ?? '');
+        $birth = (string) ($state['patient']['birth_date'] ?? '');
+        $email = $state['patient']['email'] ?? null;
+
+        $result = $otp->send($mobile, $birth, $email);
+
+        if (!$result['sent']) {
+            // Nothing was sent, so nothing is remembered and nothing is
+            // created. The patient is told plainly rather than left waiting
+            // for a code that is not coming.
+            $state['step'] = 'otp_failed';
+
+            return [$this->say("I could not send you a verification code just now. Please call the practice and they will book this for you.", 'error')];
+        }
+
+        $state['step'] = 'otp_verify';
+        $state['otp_attempts'] = 0;
+
+        return [$this->say('I have sent a four digit code to ' . $this->codeWentTo($result) . '.')];
+    }
+
+    /**
+     * A fresh code, up to the point where asking again is abuse rather than
+     * bad luck. Each one replaces the last, so only the newest works.
+     */
+    private function resendVerificationCode(array &$state, OtpService $otp): array
+    {
+        $sent = (int) ($state['otp_resends'] ?? 0);
+
+        if ($sent >= (int) config('ai-assistant.otp_max_resends', 2)) {
+            return [$this->say("I have sent that code a few times now. Please call the practice and they will help you from here.", 'error')];
+        }
+
+        $state['otp_resends'] = $sent + 1;
+        $state['otp_attempts'] = 0;
+
+        return $this->sendVerificationCode($state, $otp);
+    }
+
+    /** Only the channels that genuinely delivered. */
+    private function codeWentTo(array $result): string
+    {
+        if ($result['sms'] && $result['email']) {
+            return 'your mobile and your email';
+        }
+
+        return $result['sms'] ? 'your mobile' : 'your email';
+    }
+
+    /** "send it again", "I didn't get it", "resend the code". */
+    private function wantsAnotherCode(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        if ($value === '') {
+            return false;
+        }
+
+        return preg_match('/\b(resend|send it again|send again|another code|new code|didn t get|did not get|not received|never got|nothing came)\b/u', $value) === 1;
+    }
+
+    /**
+     * Has this patient proved the number they are registering with?
+     *
+     * Checked at the point of creation rather than at a step, because a step
+     * lives in the session and a session can be tampered with. Forcing the
+     * conversation forward reaches this and is refused here. The number is
+     * compared too: a code proved for one mobile does not verify another.
+     */
+    private function verifiedForRegistration(array $state): bool
+    {
+        return !empty($state['otp_verified'])
+            && (string) ($state['otp_verified_mobile'] ?? '') !== ''
+            && (string) $state['otp_verified_mobile'] === (string) ($state['patient']['mobile_no'] ?? '');
+    }
+
     private function identifyPatient(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
     {
         $existing = $authenticator->authenticate(
@@ -5377,6 +5544,12 @@ class ChatController extends Controller
             'chip_page' => 0,
             'patient' => [],
             'pending_email' => null,
+            // Verification of a new patient's mobile. Held against the number
+            // it was proved for, so changing the mobile does not inherit it.
+            'otp_verified' => false,
+            'otp_verified_mobile' => null,
+            'otp_attempts' => 0,
+            'otp_resends' => 0,
             // What was heard, when it differs from what is being suggested.
             'pending_email_heard' => null,
             'patient_id' => null,
