@@ -11,11 +11,41 @@ How free text is understood, what can be switched off, and what must change befo
 
 **Consent is never the AI's call.** `book()` and `cancelAppointment()` refuse to act unless `consents()` recorded a consent for that very answer. A free-text answer is consent only when `ConsentRules` finds it to be a short run of agreeing/filler words in the patient's language. A chip counts only on the confirmation question it belongs to, with the booking or cancellation actually pending.
 
+## Verifying who is asking
+
+Everyone reads a four digit code back before the assistant shows or does anything of theirs.
+
+- **A new patient** is sent a code to the mobile number and email they gave. They are not created until it is read back.
+- **A returning patient** (mobile number and date of birth match a record) is sent a code to the mobile number and email **on the practice's record**, never to anything said in the conversation, using that record's own country code. The text message is required: if it does not go out, nobody gets in. With no email on file the text alone is used. An inactive patient is refused.
+- Until the code is read back nothing is revealed (no name, no email, no appointments) and **nothing is written to the patient's record**: the lookup is read-only, and the login token is only created after the code is right.
+- A verified session carries a signature (`auth_proof`) made with the application key over the patient, the mobile number, the date of birth and the session itself. It is checked every time the session is loaded. A session that names a patient without a valid signature is dropped, so setting a patient id, copying a state from another session, or changing the number or date of birth after verification does not work. A patient is not asked again during the same conversation; a new session, a restart or "New patient" starts from the top.
+
+### Limits that no chat session can reset (`OtpGuard`)
+
+Kept per **mobile number** (digits only, leading zeros dropped, so every way of typing it is one number), in the shared cache, and updated under a lock:
+
+| Limit | Value | Setting |
+|---|---|---|
+| Codes sent per number in any rolling hour | 3 | `AI_ASSISTANT_OTP_SENDS_PER_HOUR` |
+| Wrong codes before the number is locked | 5 | `AI_ASSISTANT_OTP_ATTEMPTS` |
+| Lockout | 15 minutes | `AI_ASSISTANT_OTP_LOCKOUT_MINUTES` |
+
+A wrong attempt is counted **before** the code is compared, so simultaneous guesses are counted as they arrive and the sixth onwards is never checked. While locked, the number can neither be sent a code nor verified, even with the right code. A send that was never delivered is not counted. If the cache cannot be read or locked, the request is refused (fail closed). The same limits apply to new-patient codes.
+
+The file cache is correct for **one application server only**. With several servers each keeps its own counters and would allow the full number of guesses: use a shared store (Redis, Memcached or the database) and set `OTP_GUARD_CACHE_STORE` to it.
+
+### Known limitations (for future review)
+
+- **A returning patient can be told apart from a new one.** When a mobile number and date of birth match, the person hears that a code was sent; when they don't, they are set up as a new patient. That shows whether someone is a patient to anyone who already knows both details. The rate limits above bound how much this can be probed, but it is not removed. Hiding it would mean changing registration so a new patient also goes through a code first.
+- **A new patient's code goes to the mobile number and email they typed.** That is inherent in registering someone the practice has never seen; nothing about an existing patient is exposed by it.
+- **Locking a number can be done by someone who knows a patient's mobile number and date of birth** (they can request codes and enter wrong ones). The lockout expires after 15 minutes and does not touch the patient's record.
+
 ## Switches (all in `.env`; run `php artisan config:clear` after changing one)
 
 | Setting | Effect |
 |---|---|
 | `AI_ASSISTANT_AI_FIRST=false` | **Rollback.** English returns to rules-first (the AI is asked only when the rules fail). German keeps its behaviour: AI first. |
+| `AI_ASSISTANT_VERIFY_EXISTING=false` | **Rollback for returning patients.** Back to recognising them by mobile number and date of birth alone, with no code and no signature check. |
 | `NLU_DRIVER=none` | No AI at all. Rules only. (The automated tests run this way.) |
 | `AI_ASSISTANT_END_AFTER_BOOKING=false` | Switches off ending the conversation after a booking. On (default): goodbye, the confirmation card stays, the session is cleared, and the page resets after `AI_ASSISTANT_END_RESET_SECONDS` (60) or when the patient taps "Start a new conversation". |
 | `AI_ASSISTANT_END_AFTER_GOODBYE=false` | Switches off ending the conversation after a goodbye ("no thanks, that's all"). On (default): the same ending as after a booking. |

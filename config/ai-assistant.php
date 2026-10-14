@@ -90,7 +90,17 @@ return [
     |
     */
     'otp_ttl_minutes' => (int) env('AI_ASSISTANT_OTP_TTL', 5),
-    'otp_max_attempts' => (int) env('AI_ASSISTANT_OTP_ATTEMPTS', 3),
+    // Wrong codes allowed per mobile number, ACROSS every session, before it is locked.
+    'otp_max_attempts' => (int) env('AI_ASSISTANT_OTP_ATTEMPTS', 5),
+    'otp_lockout_minutes' => (int) env('AI_ASSISTANT_OTP_LOCKOUT_MINUTES', 15),
+    // Codes sent to one mobile number in any rolling hour, across every session.
+    'otp_max_sends_per_hour' => (int) env('AI_ASSISTANT_OTP_SENDS_PER_HOUR', 3),
+    // Where those limits are kept. null = the application's cache. The file store is
+    // right for ONE server only; several servers need a shared store (Redis etc.).
+    'otp_guard' => ['cache_store' => env('OTP_GUARD_CACHE_STORE')],
+    // Returning patients must read back a code before anything of theirs is shown or
+    // done. false = the old behaviour (recognised by mobile number and birth date alone).
+    'verify_existing' => (bool) env('AI_ASSISTANT_VERIFY_EXISTING', true),
     'otp_max_resends' => (int) env('AI_ASSISTANT_OTP_RESENDS', 2),
     'default_country' => env('PUREMED_DEFAULT_COUNTRY', 'Austria'),
     'default_postal_code' => env('PUREMED_DEFAULT_POSTAL_CODE', '1010'),

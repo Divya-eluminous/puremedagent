@@ -33,13 +33,67 @@ class PatientAuthenticator
      * @param  string  $birthDate  Y-m-d
      * @return array{patient_id: int, token: string}|null
      */
-    public function authenticate(string $mobileNo, string $birthDate): ?array
+    /**
+     * Is there a patient with this mobile number and date of birth - and the
+     * least needed to send them a verification code? Read only.
+     *
+     * Deliberately returns no token, no name and writes nothing. Knowing a
+     * mobile number and a date of birth proves nothing about who is asking, so
+     * this is all that happens BEFORE the patient has read a code back: no
+     * login token is created, nothing on the patient's record is touched, and
+     * nothing here is ever shown to the person typing.
+     *
+     * @return array{patient_id: int, mobile_no: string, country_code: string, email: string, active: bool}|null
+     */
+    public function find(string $mobileNo, string $birthDate): ?array
     {
         try {
             $patient = PatientsModel::where('mobile_no', $this->normalizeMobile($mobileNo))
                 ->whereDate('birth_date', $birthDate)
                 ->orderByDesc('id')
                 ->first();
+
+            if (!$patient) {
+                return null;
+            }
+
+            return [
+                'patient_id' => (int) $patient->id,
+                'mobile_no' => (string) $patient->mobile_no,
+                'country_code' => (string) ($patient->country_code ?? ''),
+                'email' => trim((string) ($patient->email ?? '')),
+                'active' => (int) $patient->status === 1,
+            ];
+        } catch (Throwable $exception) {
+            Log::error('AI assistant: could not look a patient up', ['error' => $exception->getMessage()]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Issue the login token and return the patient's record.
+     *
+     * ONLY for a patient who has been verified: either by reading back a code
+     * sent to the mobile and email the practice holds, or because they have
+     * just been created after doing so. It writes the token to the patient's
+     * record, which an unverified lookup must never do.
+     *
+     * @param  bool  $requireActive  refuse a patient the practice has switched off
+     */
+    public function authenticate(string $mobileNo, string $birthDate, bool $requireActive = false): ?array
+    {
+        try {
+            $patient = PatientsModel::where('mobile_no', $this->normalizeMobile($mobileNo))
+                ->whereDate('birth_date', $birthDate)
+                ->orderByDesc('id')
+                ->first();
+
+            if ($patient && $requireActive && (int) $patient->status !== 1) {
+                Log::warning('AI assistant: refused a token for an inactive patient', ['patient_id' => (int) $patient->id]);
+
+                return null;
+            }
 
             if (!$patient) {
                 Log::warning('AI assistant: no patient row found after registration', [

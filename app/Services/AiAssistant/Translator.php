@@ -42,6 +42,18 @@ class Translator
         "My AI helper is temporarily unavailable, so I couldn't understand that. Please tap one of the options, try again in a moment, or call the practice."
             => 'Mein KI-Helfer ist vorübergehend nicht erreichbar, daher konnte ich das nicht verstehen. Tippen Sie bitte auf eine der Optionen, versuchen Sie es gleich noch einmal oder rufen Sie die Praxis an.',
 
+        // Verifying a returning patient
+        'For your security, I will send you a verification code first.'
+            => 'Zu Ihrer Sicherheit sende ich Ihnen zuerst einen Bestätigungscode.',
+        'I cannot check verification codes right now. Please try again in a moment or call the practice.'
+            => 'Ich kann Bestätigungscodes gerade nicht prüfen. Bitte versuchen Sie es gleich noch einmal oder rufen Sie die Praxis an.',
+        'I cannot continue with this record. Please call the practice.'
+            => 'Mit diesem Datensatz kann ich nicht fortfahren. Bitte rufen Sie die Praxis an.',
+        'I could not send a verification code to the mobile number on file, so for your security I cannot continue. Please call the practice.'
+            => 'Ich konnte keinen Bestätigungscode an die hinterlegte Mobilnummer senden, daher kann ich aus Sicherheitsgründen nicht fortfahren. Bitte rufen Sie die Praxis an.',
+        'I could not complete the verification. Please call the practice.'
+            => 'Ich konnte die Bestätigung nicht abschließen. Bitte rufen Sie die Praxis an.',
+
         // The conversation ends after a booking
         'Thank you - have a great day! This conversation is now over and your details have been cleared. This screen will reset shortly.'
             => 'Vielen Dank – einen schönen Tag noch! Das Gespräch ist nun beendet und Ihre Angaben wurden gelöscht. Dieser Bildschirm wird in Kürze zurückgesetzt.',
@@ -263,6 +275,10 @@ class Translator
         $n = static fn (string $count, string $one, string $many): string => $count === '1' ? $one : $many;
 
         return [
+            '/^Too many incorrect codes\. For your security, verification is locked for (\d+) (?:minute|minutes)\. Please try again later or call the practice\.$/su'
+                => fn ($m) => "Zu viele falsche Codes. Zu Ihrer Sicherheit ist die Bestätigung für {$m[1]} " . $n($m[1], 'Minute', 'Minuten') . ' gesperrt. Bitte versuchen Sie es später noch einmal oder rufen Sie die Praxis an.',
+            '/^I have already sent several codes to this number\. For your security I cannot send another for (\d+) (?:minute|minutes) - please try again later or call the practice\.$/su'
+                => fn ($m) => "Ich habe bereits mehrere Codes an diese Nummer gesendet. Zu Ihrer Sicherheit kann ich für {$m[1]} " . $n($m[1], 'Minute', 'Minuten') . ' keinen weiteren senden – bitte versuchen Sie es später noch einmal oder rufen Sie die Praxis an.',
             '/^Welcome back, (.+)\.$/su' => fn ($m) => "Willkommen zurück, {$m[1]}.",
             '/^Welcome back, (.+)! I have your details already\.$/su' => fn ($m) => "Willkommen zurück, {$m[1]}! Ich habe Ihre Daten bereits.",
             '/^Welcome back! I have your details already\.$/su' => fn ($m) => 'Willkommen zurück! Ich habe Ihre Daten bereits.',

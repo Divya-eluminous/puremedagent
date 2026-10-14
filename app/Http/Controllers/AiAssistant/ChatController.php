@@ -43,8 +43,11 @@ class ChatController extends Controller
      * 2: mobile -> date of birth, then registration only if unrecognised
      * 3: mobile and date of birth in one question, full name in one question
      * 4: a new patient verifies a code before anything about them is created
+     * 5: a returning patient does too, and a signed-in session carries a proof
+     *    that it was verified. Older conversations hold an identity with no such
+     *    proof and are dropped rather than trusted.
      */
-    private const FLOW_VERSION = 4;
+    private const FLOW_VERSION = 5;
 
     /**
      * Where the one-turn undo snapshot lives.
@@ -79,6 +82,9 @@ class ChatController extends Controller
     /** The last thing said after a booking, when the conversation ends there. */
     private const GOODBYE = 'Thank you - have a great day! This conversation is now over and your details have been cleared. '
         . 'This screen will reset shortly.';
+
+    /** When codes cannot be checked or sent at all - never a way in. */
+    private const OTP_UNAVAILABLE = 'I cannot check verification codes right now. Please try again in a moment or call the practice.';
 
     /** What the patient is told when the AI is rate limited. */
     private const AI_BUSY = "My AI helper is very busy right now, so I couldn't understand that. "
@@ -1144,7 +1150,7 @@ class ChatController extends Controller
                     return $replies;
                 }
 
-                return array_merge($replies, $this->identifyPatient($state, $client, $authenticator));
+                return array_merge($replies, $this->identifyPatient($state, $client, $authenticator, $otp));
 
             case 'birth_date':
                 $date = $this->parseBirthDate($text);
@@ -1153,7 +1159,7 @@ class ChatController extends Controller
                 }
                 $state['patient']['birth_date'] = $date->format('Y-m-d');
 
-                return $this->identifyPatient($state, $client, $authenticator);
+                return $this->identifyPatient($state, $client, $authenticator, $otp);
 
             case 'email':
                 $capture = $this->captureEmail($text);
@@ -1241,11 +1247,17 @@ class ChatController extends Controller
 
 
             case 'otp_verify':
-                // Only a new patient is ever here, and nothing about them has
-                // been created yet. The code is checked against the practice's
-                // own patients_otp table - the same place the web booking flow
-                // verifies someone it has no record for.
+                // Either a NEW patient, who is not created until the code is read
+                // back, or a RETURNING one, who is not shown anything of theirs
+                // until it is. The code is checked against the practice's own
+                // patients_otp table, and the attempts are counted against the
+                // mobile number across every session (OtpGuard), not in here.
                 $entered = preg_replace('/\D+/', '', $choiceValue !== '' ? $choiceValue : $text);
+
+                if (!$otp) {
+                    // No way to check a code means no way in. Never a way round.
+                    return [$this->say(self::OTP_UNAVAILABLE, 'error')];
+                }
 
                 if ($this->wantsAnotherCode($text)) {
                     return $this->resendVerificationCode($state, $otp);
@@ -1255,26 +1267,35 @@ class ChatController extends Controller
                     return [$this->say('Could you read me the code? It is four digits.')];
                 }
 
-                if ($otp->verify($entered, $state['patient']['mobile_no'], $state['patient']['birth_date'])) {
+                $check = $otp->verifyDetailed($entered, $state['patient']['mobile_no'], $state['patient']['birth_date']);
+
+                if ($check['ok']) {
                     // Remembered against the number it was proved for, so a
                     // later change of mobile cannot inherit this verification.
                     $state['otp_verified'] = true;
                     $state['otp_verified_mobile'] = $state['patient']['mobile_no'];
                     $state['otp_attempts'] = 0;
+
+                    if (!empty($state['otp_login'])) {
+                        return $this->finishReturningLogin($state, $client, $authenticator);
+                    }
+
                     $state['step'] = 'first_name';
 
                     return [$this->say('Thank you - that is verified.')];
                 }
 
-                $state['otp_attempts'] = (int) ($state['otp_attempts'] ?? 0) + 1;
+                if ($check['unavailable']) {
+                    return [$this->say(self::OTP_UNAVAILABLE, 'error')];
+                }
 
-                if ($state['otp_attempts'] >= (int) config('ai-assistant.otp_max_attempts', 3)) {
-                    // Spent. The code is dropped rather than left to be guessed
-                    // at, and a fresh one has to be asked for.
-                    $otp->forget($state['patient']['mobile_no'], $state['patient']['birth_date']);
-                    $state['otp_attempts'] = 0;
+                if ($check['locked']) {
+                    // Too many wrong codes, from this session or any other. The
+                    // number is shut for a while, so there is nothing left to try.
+                    $state['step'] = 'otp_failed';
+                    $state['otp_login'] = null;
 
-                    return [$this->say("That code is not right, and I have to stop there for safety. Say \"send it again\" and I will send you a new one.", 'error')];
+                    return [$this->say($this->lockedMessage((int) $check['retry_after']), 'error')];
                 }
 
                 return [$this->say("That code is not right. Could you check it and read it to me again?", 'error')];
@@ -2079,6 +2100,9 @@ class ChatController extends Controller
 
         $state['patient_id'] = $credentials['patient_id'];
         $state['token'] = $credentials['token'];
+        // Created after a code was read back for this number, so this session is
+        // verified for them from here on.
+        $state['auth_proof'] = $this->authProof($state);
 
         $doctors = $client->getDoctors($state['token']);
 
@@ -5720,6 +5744,10 @@ class ChatController extends Controller
             // for a code that is not coming.
             $state['step'] = 'otp_failed';
 
+            if (!empty($result['blocked'])) {
+                return [$this->say($this->blockedMessage($result), 'error')];
+            }
+
             return [$this->say("I could not send you a verification code just now. Please call the practice and they will book this for you.", 'error')];
         }
 
@@ -5732,6 +5760,9 @@ class ChatController extends Controller
     /**
      * A fresh code, up to the point where asking again is abuse rather than
      * bad luck. Each one replaces the last, so only the newest works.
+     *
+     * Two limits apply: this conversation's own, and - the one that cannot be
+     * got round by starting again - the hourly limit on the number itself.
      */
     private function resendVerificationCode(array &$state, OtpService $otp): array
     {
@@ -5744,7 +5775,117 @@ class ChatController extends Controller
         $state['otp_resends'] = $sent + 1;
         $state['otp_attempts'] = 0;
 
+        if (!empty($state['otp_login'])) {
+            return $this->sendReturningCode($state, $otp, false);
+        }
+
         return $this->sendVerificationCode($state, $otp);
+    }
+
+    /**
+     * Send the code a returning patient must read back, to the mobile and email
+     * the practice holds for them - never to anything said in the conversation.
+     *
+     * @param  bool  $intro  say why a code is being sent (the first time, not on a resend)
+     */
+    private function sendReturningCode(array &$state, OtpService $otp, bool $intro = true): array
+    {
+        $login = $state['otp_login'];
+
+        $result = $otp->sendToPatient(
+            (string) $state['patient']['mobile_no'],
+            (string) $state['patient']['birth_date'],
+            $login,
+            $this->language()
+        );
+
+        if (!$result['sent']) {
+            $state['step'] = 'otp_failed';
+            $state['otp_login'] = null;
+
+            if (!empty($result['blocked'])) {
+                return [$this->say($this->blockedMessage($result), 'error')];
+            }
+
+            // The text message did not go out. A returning patient is verified
+            // through their phone, so there is no way in without it.
+            return [$this->say('I could not send a verification code to the mobile number on file, so for your security I cannot continue. Please call the practice.', 'error')];
+        }
+
+        $state['step'] = 'otp_verify';
+        $state['otp_attempts'] = 0;
+
+        $replies = [];
+
+        if ($intro) {
+            $replies[] = $this->say('For your security, I will send you a verification code first.');
+        }
+
+        $replies[] = $this->say('I have sent a four digit code to ' . $this->codeWentTo($result) . '.');
+
+        return $replies;
+    }
+
+    /**
+     * The code was right. Only now does the patient get a token, a name said
+     * back to them, or anything of theirs.
+     */
+    private function finishReturningLogin(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
+    {
+        $login = $state['otp_login'];
+
+        // Looked up afresh and compared with who the code was sent to, rather
+        // than trusting what was remembered a minute ago.
+        $existing = $authenticator->authenticate(
+            (string) $state['patient']['mobile_no'],
+            (string) $state['patient']['birth_date'],
+            true
+        );
+
+        if (!$existing || (int) $existing['patient_id'] !== (int) ($login['patient_id'] ?? 0)) {
+            $state['step'] = 'otp_failed';
+            $state['otp_login'] = null;
+            $state['otp_verified'] = false;
+
+            return [$this->say('I could not complete the verification. Please call the practice.', 'error')];
+        }
+
+        $state['otp_login'] = null;
+
+        $replies = $this->resumeExistingPatient($state, $existing, $client);
+
+        // Signed last, once the identity is final, so it covers exactly what the
+        // session will carry from here on.
+        if (!empty($state['patient_id'])) {
+            $state['auth_proof'] = $this->authProof($state);
+        }
+
+        return $replies;
+    }
+
+    /** What to say when a number has run into the send limit or a lockout. */
+    private function blockedMessage(array $result): string
+    {
+        if (($result['blocked'] ?? '') === 'guard_unavailable') {
+            return self::OTP_UNAVAILABLE;
+        }
+
+        if (($result['blocked'] ?? '') === 'locked') {
+            return $this->lockedMessage((int) ($result['retry_after'] ?? 0));
+        }
+
+        $minutes = max(1, (int) ceil(((int) ($result['retry_after'] ?? 60)) / 60));
+
+        return 'I have already sent several codes to this number. For your security I cannot send another for '
+            . $minutes . ' ' . ($minutes === 1 ? 'minute' : 'minutes') . ' - please try again later or call the practice.';
+    }
+
+    private function lockedMessage(int $seconds): string
+    {
+        $minutes = max(1, (int) ceil($seconds / 60));
+
+        return 'Too many incorrect codes. For your security, verification is locked for '
+            . $minutes . ' ' . ($minutes === 1 ? 'minute' : 'minutes') . '. Please try again later or call the practice.';
     }
 
     /** Only the channels that genuinely delivered. */
@@ -5785,15 +5926,40 @@ class ChatController extends Controller
             && (string) $state['otp_verified_mobile'] === (string) ($state['patient']['mobile_no'] ?? '');
     }
 
-    private function identifyPatient(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
+    private function identifyPatient(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator, ?OtpService $otp = null): array
     {
-        $existing = $authenticator->authenticate(
-            $state['patient']['mobile_no'],
-            $state['patient']['birth_date']
-        );
+        // A returning patient reads back a code before anything of theirs is
+        // shown or done. The lookup below creates no token, writes nothing and
+        // reveals nothing: a mobile number and a date of birth are not proof.
+        if (config('ai-assistant.verify_existing', true)) {
+            $found = $authenticator->find($state['patient']['mobile_no'], $state['patient']['birth_date']);
 
-        if ($existing) {
-            return $this->resumeExistingPatient($state, $existing, $client);
+            if ($found) {
+                if (empty($found['active'])) {
+                    $state['step'] = 'otp_failed';
+
+                    return [$this->say('I cannot continue with this record. Please call the practice.', 'error')];
+                }
+
+                if (!$otp) {
+                    $state['step'] = 'otp_failed';
+
+                    return [$this->say(self::OTP_UNAVAILABLE, 'error')];
+                }
+
+                $state['otp_login'] = $found;
+
+                return $this->sendReturningCode($state, $otp);
+            }
+        } else {
+            $existing = $authenticator->authenticate(
+                $state['patient']['mobile_no'],
+                $state['patient']['birth_date']
+            );
+
+            if ($existing) {
+                return $this->resumeExistingPatient($state, $existing, $client);
+            }
         }
 
         // Nothing to show or cancel if we have never seen this person.
@@ -6083,7 +6249,42 @@ class ChatController extends Controller
             $stored = [];
         }
 
+        // A conversation that says who the patient is must be able to PROVE a
+        // code was read back for them in THIS session. The proof is a signature
+        // over the patient, the number and date of birth they were verified
+        // for, and the session itself, made with the application key - so it
+        // cannot be copied from another session, kept after the identity
+        // changes, or conjured by setting a patient id. One that fails is not
+        // repaired: it is dropped, and the person starts again from the top.
+        if (config('ai-assistant.verify_existing', true)
+            && $stored !== []
+            && (!empty($stored['patient_id']) || !empty($stored['token']))
+            && !hash_equals($this->authProof($stored), (string) ($stored['auth_proof'] ?? ''))) {
+            Log::warning('AI assistant: dropped a session whose verification could not be proved');
+            session()->forget(self::SESSION_KEY);
+            session()->forget(self::UNDO_KEY);
+            $stored = [];
+        }
+
         return array_merge($this->freshState(), $stored);
+    }
+
+    /**
+     * The signature that says this session was verified for this patient.
+     *
+     * Bound to the session id as well as the identity, so a state copied into a
+     * different session proves nothing there.
+     */
+    private function authProof(array $state): string
+    {
+        $material = implode('|', [
+            (string) ($state['patient_id'] ?? ''),
+            (string) ($state['patient']['mobile_no'] ?? ''),
+            (string) ($state['patient']['birth_date'] ?? ''),
+            (string) session()->getId(),
+        ]);
+
+        return hash_hmac('sha256', $material, (string) config('app.key'));
     }
 
     private function freshState(): array
@@ -6100,6 +6301,11 @@ class ChatController extends Controller
             // it was proved for, so changing the mobile does not inherit it.
             'otp_verified' => false,
             'otp_verified_mobile' => null,
+            // A returning patient being verified: what the practice holds for
+            // them (never shown to the patient), until the code is read back.
+            'otp_login' => null,
+            // Signed once a code has been read back; see authProof().
+            'auth_proof' => null,
             'otp_attempts' => 0,
             'otp_resends' => 0,
             // What was heard, when it differs from what is being suggested.
