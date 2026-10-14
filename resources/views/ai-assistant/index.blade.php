@@ -2,6 +2,12 @@
 
 @section('title', $pageTitle ?? 'PureMed AI Assistant')
 
+{{-- The assistant writes its own English and German. This stops Chrome offering to
+     translate the whole page (and rewriting the assistant's words if accepted). --}}
+@section('style')
+    <meta name="google" content="notranslate">
+@endsection
+
 @section('content')
 <style>
     .pm-chat {
@@ -58,6 +64,25 @@
         cursor: pointer;
     }
     .pm-restart:hover { background: #f6f9ff; color: var(--pm-blue); }
+
+    .pm-lang {
+        display: inline-flex;
+        border: 1px solid var(--pm-line);
+        border-radius: 999px;
+        overflow: hidden;
+        background: #fff;
+    }
+    .pm-lang button {
+        border: 0;
+        background: transparent;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 11px;
+        cursor: pointer;
+    }
+    .pm-lang button:hover { background: #f6f9ff; }
+    .pm-lang button.on { background: #eef4ff; color: var(--pm-blue); }
 
     .pm-speaker {
         border: 1px solid var(--pm-line);
@@ -321,7 +346,9 @@
     }
 </style>
 
-<div class="pm-chat">
+{{-- The assistant writes its own English and German. Without this Chrome offers to
+     translate the page and, if accepted, rewrites the assistant's words. --}}
+<div class="pm-chat notranslate" translate="no">
     {{--
         PureMed assistant mark, defined once and referenced by every assistant
         message with <use>. Inline so there is no extra request and no asset
@@ -349,6 +376,10 @@
             <div class="pm-subtitle" id="pmStatus">Online</div>
         </div>
         <div class="pm-header-spacer"></div>
+        <div class="pm-lang" id="pmLang" role="group" aria-label="Language / Sprache">
+            <button type="button" data-lang="en" title="English">EN</button>
+            <button type="button" data-lang="de" title="Deutsch">DE</button>
+        </div>
         <button type="button" class="pm-speaker" id="pmSpeaker" title="Read replies aloud" aria-label="Read replies aloud">&#128264;</button>
         <button type="button" class="pm-restart" id="pmRestart" title="Clear the chat and begin as a new patient">New patient</button>
     </div>
@@ -383,8 +414,95 @@
     var restartBtn = document.getElementById('pmRestart');
     var speakerBtn = document.getElementById('pmSpeaker');
 
+    var langBox = document.getElementById('pmLang');
+
+    /* ---------------- language ----------------
+       The page speaks English or German. Everything the assistant SAYS is
+       translated on the server; this table is only the page's own wording -
+       buttons, hints, status lines and the words read aloud.                 */
+
+    var I18N = {
+        en: {
+            online: 'Online',
+            typing: 'Typing...',
+            placeholder: 'Type your reply...',
+            hintIdle: 'Type or tap the microphone to speak.',
+            hintHandsFree: 'Hands-free listening is on.',
+            hintListening: 'Listening...',
+            hintBlocked: 'Microphone blocked. Allow mic access and try again.',
+            hintNotHeard: 'I could not hear that. Please try again.',
+            hintGaveUp: "I couldn't hear anything. Tap the microphone when you're ready.",
+            micTitle: 'Speak',
+            micNoSupport: 'Voice input is not supported in this browser',
+            micOn: 'Hands-free listening on - tap to turn off',
+            micOff: 'Tap to talk',
+            send: 'Send',
+            speakerLabel: 'Read replies aloud',
+            speakerOn: 'Voice replies on - click to mute',
+            speakerOff: 'Voice replies off - click to hear replies',
+            speakerNoSupport: 'This browser cannot read replies aloud',
+            voiceOn: 'Voice replies are on.',
+            newConversation: 'Start a new conversation',
+            restart: 'New patient',
+            restartTitle: 'Clear the chat and begin as a new patient',
+            edit: 'Edit this message',
+            confirmed: 'Appointment confirmed',
+            lostConnection: 'Sorry, I lost the connection for a moment. Could you say that again?',
+            cannotChange: 'I cannot change that message now.',
+            cannotRestart: 'I could not restart just now. Please reload the page.',
+            speechLang: 'en-US',
+            months: ['January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December']
+        },
+        de: {
+            online: 'Online',
+            typing: 'Schreibt ...',
+            placeholder: 'Antwort eingeben ...',
+            hintIdle: 'Schreiben Sie oder tippen Sie auf das Mikrofon, um zu sprechen.',
+            hintHandsFree: 'Freisprech-Zuhören ist an.',
+            hintListening: 'Ich höre zu ...',
+            hintBlocked: 'Mikrofon blockiert. Erlauben Sie den Mikrofonzugriff und versuchen Sie es erneut.',
+            hintNotHeard: 'Das konnte ich nicht hören. Bitte versuchen Sie es noch einmal.',
+            hintGaveUp: 'Ich habe nichts gehört. Tippen Sie auf das Mikrofon, wenn Sie bereit sind.',
+            micTitle: 'Sprechen',
+            micNoSupport: 'Spracheingabe wird in diesem Browser nicht unterstützt',
+            micOn: 'Freisprech-Zuhören ist an – zum Ausschalten tippen',
+            micOff: 'Zum Sprechen tippen',
+            send: 'Senden',
+            speakerLabel: 'Antworten vorlesen',
+            speakerOn: 'Sprachantworten an – zum Stummschalten klicken',
+            speakerOff: 'Sprachantworten aus – zum Anhören klicken',
+            speakerNoSupport: 'Dieser Browser kann Antworten nicht vorlesen',
+            voiceOn: 'Sprachantworten sind an.',
+            newConversation: 'Neues Gespräch beginnen',
+            restart: 'Neuer Patient',
+            restartTitle: 'Chat leeren und als neuer Patient beginnen',
+            edit: 'Diese Nachricht bearbeiten',
+            confirmed: 'Termin bestätigt',
+            lostConnection: 'Entschuldigung, die Verbindung war kurz weg. Können Sie das noch einmal sagen?',
+            cannotChange: 'Diese Nachricht kann ich jetzt nicht mehr ändern.',
+            cannotRestart: 'Ich konnte gerade nicht neu starten. Bitte laden Sie die Seite neu.',
+            speechLang: 'de-DE',
+            months: ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni',
+                'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
+        }
+    };
+
+    var LANG_KEY = 'puremed_assistant_lang';
+    var LANG = 'en';
+
+    try {
+        var savedLang = window.localStorage.getItem(LANG_KEY);
+        if (savedLang === 'de' || savedLang === 'en') { LANG = savedLang; }
+    } catch (error) { /* private mode - English */ }
+
+    /** The page's own wording in the current language. */
+    function tr(key) { return I18N[LANG][key]; }
+
     var busy = false;
     var currentCards = null;
+    // Counts down to the automatic reset after a booking has ended the conversation.
+    var endTimer = null;
     // Status lines to narrate on the NEXT send, supplied by the last response.
     var pendingStatus = null;
     // Set when the pending message came from the microphone rather than typing.
@@ -468,9 +586,6 @@
         return row;
     }
 
-    var SPOKEN_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'];
-
     function ordinalSuffix(day) {
         if (day % 100 >= 11 && day % 100 <= 13) { return 'th'; }
         return ({ 1: 'st', 2: 'nd', 3: 'rd' })[day % 10] || 'th';
@@ -482,6 +597,12 @@
      * spoken version is turned into something a receptionist would say.
      */
     function spokenTime(hour, minute) {
+        // German is read the way the screen writes it: "14:30 Uhr" is how it is
+        // said, and the voice reads the digits itself.
+        if (LANG === 'de') {
+            return hour + (minute > 0 ? ' Uhr ' + minute : ' Uhr');
+        }
+
         if (hour === 0 && minute === 0) { return 'midnight'; }
         if (hour === 12 && minute === 0) { return 'midday'; }
 
@@ -505,10 +626,15 @@
 
             if (!d || d > 31 || !m || m > 12) { return whole; }
 
-            return 'the ' + d + ordinalSuffix(d) + ' of ' + SPOKEN_MONTHS[m - 1];
+            // German: "am 13. August" - the voice reads the ordinal itself.
+            if (LANG === 'de') { return d + '. ' + tr('months')[m - 1]; }
+
+            return 'the ' + d + ordinalSuffix(d) + ' of ' + tr('months')[m - 1];
         });
 
-        return text.replace(/\b(\d{1,2}):(\d{2})\b/g, function (whole, hour, minute) {
+        // "um 14:30 Uhr" already carries the word, so it is consumed here and
+        // spokenTime() puts it back once.
+        return text.replace(/\b(\d{1,2}):(\d{2})\b(\s*Uhr\b)?/g, function (whole, hour, minute) {
             var h = parseInt(hour, 10);
             var m = parseInt(minute, 10);
 
@@ -537,8 +663,8 @@
         var button = document.createElement('button');
         button.type = 'button';
         button.className = 'pm-edit';
-        button.title = 'Edit this message';
-        button.setAttribute('aria-label', 'Edit this message');
+        button.title = tr('edit');
+        button.setAttribute('aria-label', tr('edit'));
         button.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" '
             + 'stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 1.9l2.6 2.6"/>'
             + '<path d="M12.3 1.1a1.2 1.2 0 011.7 1.7L5.2 11.6l-2.7.8.8-2.7z"/></svg>';
@@ -683,7 +809,7 @@
         if (booked) {
             var head = document.createElement('div');
             head.className = 'pm-summary-head';
-            head.textContent = 'Appointment confirmed';
+            head.textContent = tr('confirmed');
             card.appendChild(head);
         }
 
@@ -726,7 +852,7 @@
         busy = value;
         sendBtn.disabled = value;
         micBtn.disabled = value || !speechSupported;
-        status.textContent = value ? 'Typing...' : 'Online';
+        status.textContent = value ? tr('typing') : tr('online');
     }
 
     /**
@@ -805,7 +931,7 @@
                 'X-Requested-With': 'XMLHttpRequest'
             },
             credentials: 'same-origin',
-            body: JSON.stringify(payload || {})
+            body: JSON.stringify(Object.assign({ lang: LANG }, payload || {}))
         })
             .then(function (response) {
                 // The server declined the correction - usually because the
@@ -813,7 +939,7 @@
                 // an answer, not a failure, so it is said in its own words.
                 if (response.status === 409) {
                     return response.json().then(function (data) {
-                        throw { spoken: data.error || 'I cannot change that message now.' };
+                        throw { spoken: data.error || tr('cannotChange') };
                     });
                 }
                 if (!response.ok) { throw new Error('HTTP ' + response.status); }
@@ -827,7 +953,7 @@
                 typing.stop();
                 addBubble('assistant', (error && error.spoken)
                     ? error.spoken
-                    : 'Sorry, I lost the connection for a moment. Could you say that again?', 'error');
+                    : tr('lostConnection'), 'error');
                 setBusy(false);
             });
     }
@@ -868,6 +994,10 @@
                     setHandsFree(true);
                 }
 
+                // A booking ended the conversation: goodbye said, nothing more to
+                // type. Placed after the hands-free restore above so it wins.
+                if (data.ended) { endConversation(data.reset_after); }
+
                 resumeListening(data);
                 return;
             }
@@ -901,7 +1031,7 @@
         input.disabled = !enabled;
         sendBtn.disabled = !enabled;
         micBtn.disabled = !enabled || !speechSupported;
-        input.placeholder = (config && config.placeholder) || 'Type your reply...';
+        input.placeholder = (config && config.placeholder) || tr('placeholder');
 
         if (enabled) { input.focus(); }
     }
@@ -938,7 +1068,49 @@
         send({ text: text, source: source }, correcting ? EDIT_ENDPOINT : null);
     }
 
-    function restart() {
+    /**
+     * The booking is confirmed and the server has cleared the patient's session.
+     * The confirmation card stays so it can be read; the microphone goes quiet; and
+     * the screen returns to its start state after a short wait, or at once when
+     * the patient taps the button. A shared screen must not keep one patient's
+     * details on show for the next person.
+     */
+    function endConversation(seconds) {
+        setHandsFree(false);
+        stopListening();
+        // setBusy(false) has just re-enabled these; nothing can be sent now.
+        sendBtn.disabled = true;
+        micBtn.disabled = true;
+
+        var wrap = document.createElement('div');
+        wrap.className = 'pm-cards';
+
+        var chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'pm-card';
+        var title = document.createElement('b');
+        title.textContent = tr('newConversation');
+        chip.appendChild(title);
+        chip.addEventListener('click', function () { restart(false); });
+
+        wrap.appendChild(chip);
+        stream.appendChild(wrap);
+        currentCards = wrap;
+        scroll();
+
+        window.clearTimeout(endTimer);
+        endTimer = window.setTimeout(function () { restart(true); }, Math.max(5, Number(seconds) || 60) * 1000);
+    }
+
+    /**
+     * @param {boolean} automatic  true when the page resets itself with nobody
+     *        there: the microphone is then NOT switched on, because there is no
+     *        tap to permit it and nobody to listen to.
+     */
+    function restart(automatic) {
+        window.clearTimeout(endTimer);
+        endTimer = null;
+
         if (busy) { return; }
         voiceOutput.stop();
         clearCards();
@@ -959,7 +1131,7 @@
         // will open the microphone; resumeListening() starts it once the
         // greeting has been spoken. If the mic is blocked, onerror turns
         // hands-free back off and says so, so the keyboard still works.
-        if (speechSupported) {
+        if (speechSupported && !automatic) {
             handsFreeSuspended = false;
             voiceOutput.enable();
             setHandsFree(true);
@@ -975,7 +1147,8 @@
                 'X-CSRF-TOKEN': CSRF,
                 'X-Requested-With': 'XMLHttpRequest'
             },
-            credentials: 'same-origin'
+            credentials: 'same-origin',
+            body: JSON.stringify({ lang: LANG })
         })
             .then(function (response) { return response.json(); })
             .then(function (data) {
@@ -983,7 +1156,7 @@
                 paint(data);
             })
             .catch(function () {
-                addBubble('assistant', 'I could not restart just now. Please reload the page.', 'error');
+                addBubble('assistant', tr('cannotRestart'), 'error');
                 setBusy(false);
             });
     }
@@ -1003,7 +1176,7 @@
         }
     });
     sendBtn.addEventListener('click', submitTyped);
-    restartBtn.addEventListener('click', restart);
+    restartBtn.addEventListener('click', function () { restart(false); });
 
     /* ---------------- voice output ----------------
        Speaking is a pure output adapter: it reads whatever the assistant says
@@ -1022,10 +1195,125 @@
             enabled = supported && window.localStorage.getItem(PREF_KEY) !== '0';
         } catch (error) { enabled = supported; }
 
+        /*
+         * Which voice reads the replies.
+         *
+         * Left alone, the browser uses its default voice for the language - and
+         * those defaults differ: on Windows the English one is male (David) and
+         * the German one is female (Hedda), so switching language changed the
+         * speaker. The browser does not say which voices are male or female, so
+         * this goes by name: voices of the preferred kind (PREFER_MALE below)
+         * score up, voices of the other kind score down, and the best match for
+         * the language wins. Both languages therefore get the same kind of voice. If the device has no voice it
+         * recognises, the browser's default is used, exactly as before.
+         */
+        var FEMALE = ['zira', 'aria', 'jenny', 'sonia', 'libby', 'hazel', 'susan', 'samantha', 'karen', 'moira',
+            'tessa', 'victoria', 'allison', 'ava', 'emma', 'hedda', 'katja', 'marlene', 'vicki', 'petra', 'anna',
+            'amala', 'google us english', 'google deutsch', 'female', 'weiblich', 'frau'];
+        var MALE = ['david', 'mark', 'george', 'james', 'richard', 'daniel', 'alex', 'fred', 'thomas', 'stefan',
+            'michael', 'markus', 'conrad', 'killian', 'guy', 'ryan', 'christopher', 'eric', 'roger', 'steffan', 'jonas',
+            'florian', 'male', 'maennlich', 'mann'];
+        var chosenVoices = {};
+
+        // Which kind of voice is wanted when BOTH languages can offer it.
+        // true = male, false = female.
+        var PREFER_MALE = true;
+
+        // The kind actually used. Both languages must sound alike, so it is
+        // only the preferred kind if each language has a voice of that kind.
+        // Chrome, for one, ships a male English voice but only a female German
+        // one: wanting "male" there would give English a man and German a woman.
+        // In that case both fall back to the kind they share.
+        var chosenKind = null;
+        var LANGUAGES_SPOKEN = ['en-US', 'de-DE'];
+
+        /** Whole words only: "male" must not be found inside "female". */
+        function hasWord(name, word) {
+            return (' ' + name.replace(/[^a-z0-9]+/g, ' ') + ' ').indexOf(' ' + word + ' ') !== -1;
+        }
+
+        /** Does this language have at least one voice of the given kind? */
+        function hasVoiceOfKind(voices, lang, list, others) {
+            var base = lang.split('-')[0].toLowerCase();
+
+            return voices.some(function (voice) {
+                var voiceLang = String(voice.lang || '').replace('_', '-').toLowerCase();
+                if (voiceLang.split('-')[0] !== base) { return false; }
+                var name = String(voice.name || '').toLowerCase();
+                var isKind = list.some(function (word) { return hasWord(name, word); });
+                var isOther = others.some(function (word) { return hasWord(name, word); });
+
+                return isKind && !isOther;
+            });
+        }
+
+        /** true for male, false for female - the same answer for every language. */
+        function wantMale(voices) {
+            if (chosenKind !== null) { return chosenKind === 'male'; }
+
+            var bothMale = LANGUAGES_SPOKEN.every(function (l) { return hasVoiceOfKind(voices, l, MALE, FEMALE); });
+            var bothFemale = LANGUAGES_SPOKEN.every(function (l) { return hasVoiceOfKind(voices, l, FEMALE, MALE); });
+            var male = PREFER_MALE ? (bothMale || !bothFemale) : (!bothFemale && bothMale);
+
+            chosenKind = male ? 'male' : 'female';
+            if (DEBUG) {
+                // Everything this browser can say in these languages, so a missing
+                // male voice is visible rather than guessed at.
+                LANGUAGES_SPOKEN.forEach(function (l) {
+                    var base = l.split('-')[0];
+                    console.log('[pm] ' + l + ' voices: ' + (voices.filter(function (v) {
+                        return String(v.lang || '').toLowerCase().indexOf(base) === 0;
+                    }).map(function (v) { return v.name + ' [' + v.lang + ']'; }).join('; ') || '(none)'));
+                });
+                console.log('[pm] voices: male in both languages=' + bothMale + ', female in both=' + bothFemale
+                    + ' -> using ' + chosenKind);
+            }
+
+            return male;
+        }
+
+        function voiceFor(lang) {
+            if (chosenVoices[lang]) { return chosenVoices[lang]; }
+
+            var all = [];
+            try { all = window.speechSynthesis.getVoices() || []; } catch (error) { return null; }
+            if (!all.length) { return null; }   // not loaded yet; asked again on the next reply
+
+            var base = lang.split('-')[0].toLowerCase();
+            var best = null;
+            var bestScore = -Infinity;
+            var male = wantMale(all);
+
+            all.forEach(function (voice) {
+                var voiceLang = String(voice.lang || '').replace('_', '-').toLowerCase();
+                if (voiceLang.split('-')[0] !== base) { return; }
+
+                var name = String(voice.name || '').toLowerCase();
+                var score = voiceLang === lang.toLowerCase() ? 2 : 0;   // the exact variant first
+                (male ? MALE : FEMALE).forEach(function (word) { if (hasWord(name, word)) { score += 10; } });
+                (male ? FEMALE : MALE).forEach(function (word) { if (hasWord(name, word)) { score -= 10; } });
+                // The newer "Natural"/online voices sound better; prefer them among equals.
+                if (name.indexOf('natural') !== -1 || name.indexOf('online') !== -1) { score += 1; }
+
+                if (score > bestScore) { best = voice; bestScore = score; }
+            });
+
+            if (best) { chosenVoices[lang] = best; }
+            if (DEBUG && best) { console.log('[pm] voice for ' + lang + ': ' + best.name + ' (score ' + bestScore + ')'); }
+
+            return best;
+        }
+
+        // Voices arrive after the page loads in Chrome; forget a choice made
+        // before the full list was there.
+        try {
+            window.speechSynthesis.addEventListener('voiceschanged', function () { chosenVoices = {}; chosenKind = null; });
+        } catch (error) { /* older browsers: the default voice is used */ }
+
         function paintButton() {
             speakerBtn.classList.toggle('on', enabled);
             speakerBtn.innerHTML = enabled ? '&#128266;' : '&#128264;';
-            speakerBtn.title = enabled ? 'Voice replies on - click to mute' : 'Voice replies off - click to hear replies';
+            speakerBtn.title = enabled ? tr('speakerOn') : tr('speakerOff');
         }
 
         function remember() {
@@ -1067,7 +1355,9 @@
 
             try {
                 var utterance = new SpeechSynthesisUtterance(String(text));
-                utterance.lang = 'en-US';
+                utterance.lang = tr('speechLang');
+                var voice = voiceFor(utterance.lang);
+                if (voice) { utterance.voice = voice; }
                 utterance.rate = 1;
                 utterance.pitch = 1;
                 utterance.onstart = function () { speakerBtn.classList.add('speaking'); };
@@ -1134,7 +1424,7 @@
 
         if (!supported) {
             speakerBtn.disabled = true;
-            speakerBtn.title = 'This browser cannot read replies aloud';
+            speakerBtn.title = tr('speakerNoSupport');
         }
 
         speakerBtn.addEventListener('click', function () {
@@ -1145,12 +1435,13 @@
             remember();
             // The click is the user gesture browsers require before speaking,
             // so confirm out loud that sound is now on.
-            if (enabled) { speak('Voice replies are on.'); }
+            if (enabled) { speak(tr('voiceOn')); }
         });
 
         paintButton();
 
         return {
+            repaint: paintButton,
             speak: speak,
             stop: stop,
             whenSilent: whenSilent,
@@ -1188,18 +1479,18 @@
 
     if (!speechSupported) {
         micBtn.disabled = true;
-        micBtn.title = 'Voice input is not supported in this browser';
+        micBtn.title = tr('micNoSupport');
     }
 
     function setHandsFree(on) {
         handsFree = on;
         unheardInARow = 0;
         micBtn.classList.toggle('armed', on && !listening);
-        micBtn.title = on ? 'Hands-free listening on - tap to turn off' : 'Tap to talk';
+        micBtn.title = on ? tr('micOn') : tr('micOff');
 
         if (!on) {
             stopListening();
-            hint.textContent = 'Type or tap the microphone to speak.';
+            hint.textContent = tr('hintIdle');
         }
     }
 
@@ -1265,7 +1556,7 @@
         if (voiceOutput.isSpeaking()) { return; }
 
         recognition = new SpeechRecognition();
-        recognition.lang = 'en-US';
+        recognition.lang = tr('speechLang');
         recognition.interimResults = true;
 
         // People spell an email out with gaps - "j o h n ... dot ... s m i t h"
@@ -1280,7 +1571,7 @@
         var finalText = '';
         listening = true;
         micBtn.classList.add('listening');
-        hint.textContent = 'Listening...';
+        hint.textContent = tr('hintListening');
 
         recognition.onresult = function (event) {
             var interim = '';
@@ -1295,7 +1586,7 @@
             // patient has typed themselves.
             micWrote = input.value;
             autoGrow();
-            hint.textContent = 'Listening... ' + (interim || finalText);
+            hint.textContent = tr('hintListening') + ' ' + (interim || finalText);
 
             // The raw engine output, before this page touches it.
             if (DEBUG && finalText) {
@@ -1318,9 +1609,7 @@
             var blocked = event.error === 'not-allowed';
             if (blocked) { setHandsFree(false); }
             stopListening();
-            hint.textContent = blocked
-                ? 'Microphone blocked. Allow mic access and try again.'
-                : 'I could not hear that. Please try again.';
+            hint.textContent = blocked ? tr('hintBlocked') : tr('hintNotHeard');
         };
 
         recognition.onend = function () {
@@ -1345,7 +1634,7 @@
 
             if (unheardInARow >= 3) {
                 setHandsFree(false);
-                hint.textContent = "I couldn't hear anything. Tap the microphone when you're ready.";
+                hint.textContent = tr('hintGaveUp');
                 return;
             }
 
@@ -1380,9 +1669,7 @@
         micBtn.classList.toggle('armed', handsFree);
 
         if (!keepHint) {
-            hint.textContent = handsFree
-                ? 'Hands-free listening is on.'
-                : 'Type or tap the microphone to speak.';
+            hint.textContent = handsFree ? tr('hintHandsFree') : tr('hintIdle');
         }
 
         if (recognition) {
@@ -1424,6 +1711,62 @@
         } catch (error) { /* same */ }
     }
 
+    /** Put the page's own wording, and the highlighted button, into the current language. */
+    function applyLanguage() {
+        document.documentElement.setAttribute('lang', LANG);
+        status.textContent = busy ? tr('typing') : tr('online');
+        input.placeholder = tr('placeholder');
+        hint.textContent = handsFree ? tr('hintHandsFree') : tr('hintIdle');
+        micBtn.title = speechSupported ? (handsFree ? tr('micOn') : tr('micOff')) : tr('micNoSupport');
+        micBtn.setAttribute('aria-label', tr('micTitle'));
+        sendBtn.title = tr('send');
+        sendBtn.setAttribute('aria-label', tr('send'));
+        speakerBtn.setAttribute('aria-label', tr('speakerLabel'));
+        restartBtn.textContent = tr('restart');
+        restartBtn.title = tr('restartTitle');
+        voiceOutput.repaint();
+
+        Array.prototype.forEach.call(langBox.querySelectorAll('button'), function (button) {
+            button.classList.toggle('on', button.getAttribute('data-lang') === LANG);
+        });
+    }
+
+    /**
+     * Switch language mid-conversation.
+     *
+     * Nothing about the booking is lost: the server keeps the conversation and
+     * simply asks its current question again in the new language. The old
+     * bubbles are cleared because they were written in the old one.
+     */
+    function setLanguage(next) {
+        if (next === LANG || busy) { return; }
+
+        LANG = next;
+        try { window.localStorage.setItem(LANG_KEY, LANG); } catch (error) { /* private mode */ }
+
+        voiceOutput.stop();
+        stopListening();
+        window.clearTimeout(endTimer);
+        endTimer = null;
+        removeEditControl();
+        clearCards();
+        turn = null;
+        editing = false;
+        input.value = '';
+        autoGrow();
+        pendingStatus = null;
+        stream.innerHTML = '';
+
+        applyLanguage();
+        send({ start: true });
+    }
+
+    langBox.addEventListener('click', function (event) {
+        var button = event.target.closest ? event.target.closest('button[data-lang]') : null;
+        if (button) { setLanguage(button.getAttribute('data-lang')); }
+    });
+
+    applyLanguage();
     send({ start: true });
     armMicrophoneIfAllowed();
 })();

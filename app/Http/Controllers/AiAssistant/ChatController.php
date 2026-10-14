@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\AiAssistant;
 
 use App\Http\Controllers\Controller;
+use App\Services\AiAssistant\ConsentRules;
 use App\Services\AiAssistant\NluManager;
 use App\Services\AiAssistant\PatientAuthenticator;
 use App\Services\AiAssistant\OtpService;
 use App\Services\AiAssistant\PureMedApiClient;
+use App\Services\AiAssistant\Translator;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -53,6 +55,12 @@ class ChatController extends Controller
     private const UNDO_KEY = 'ai_assistant.undo';
 
     /**
+     * The language the patient chose, kept apart from the conversation state so
+     * that starting a new patient does not switch the language back.
+     */
+    private const LANGUAGE_KEY = 'ai_assistant.language';
+
+    /**
      * Steps reached only by a completed PureMed write.
      *
      * A booking has been made or an appointment has been cancelled at the
@@ -60,6 +68,21 @@ class ChatController extends Controller
      * snapshot survives into or out of these steps.
      */
     private const TERMINAL_STEPS = ['done', 'cancelled'];
+
+    /** What the patient is told when the AI service cannot be used. */
+    private const AI_UNAVAILABLE = "My AI helper is temporarily unavailable, so I couldn't understand that. "
+        . 'Please tap one of the options, try again in a moment, or call the practice.';
+
+    /** Said after a goodbye, which has already been worded. */
+    private const ENDED_NOTICE = 'This conversation is now over and your details have been cleared. This screen will reset shortly.';
+
+    /** The last thing said after a booking, when the conversation ends there. */
+    private const GOODBYE = 'Thank you - have a great day! This conversation is now over and your details have been cleared. '
+        . 'This screen will reset shortly.';
+
+    /** What the patient is told when the AI is rate limited. */
+    private const AI_BUSY = "My AI helper is very busy right now, so I couldn't understand that. "
+        . 'Please tap one of the options or try again in a moment.';
 
     /** Chip value that reveals the next page of choices. */
     private const MORE = '__more__';
@@ -84,6 +107,10 @@ class ChatController extends Controller
         'morning', 'afternoon', 'evening', 'slot', 'slots', 'time', 'date', 'change', 'help',
         'and', 'for', 'with', 'about', 'the', 'you', 'your', 'me', 'we', 'they', 'checkup',
         'consultation', 'start', 'over', 'again', 'sorry', 'ok', 'okay',
+        // German requests and pleasantries, for the same reason.
+        'ja', 'nein', 'termin', 'termine', 'buchen', 'hallo', 'danke', 'bitte', 'arzt', 'ärztin',
+        'heute', 'morgen', 'absagen', 'ändern', 'hilfe', 'ich', 'möchte', 'moechte', 'brauche',
+        'einen', 'eine', 'für', 'und', 'zum',
     ];
 
     /**
@@ -155,7 +182,10 @@ class ChatController extends Controller
             'choice.value' => ['nullable', 'string', 'max:120'],
             'start' => ['nullable', 'boolean'],
             'source' => ['nullable', 'string', 'in:voice,text'],
+            'lang' => ['nullable', 'string', 'in:en,de'],
         ]);
+
+        $this->rememberLanguage($request);
 
         $state = $this->state();
         $replies = [];
@@ -164,7 +194,17 @@ class ChatController extends Controller
 
         $text = trim((string) $request->input('text', ''));
         $choiceValue = (string) $request->input('choice.value', '');
+        $choiceType = (string) $request->input('choice.type', '');
         $source = (string) $request->input('source', '');
+
+        // A chip is the answer to the question it was drawn under. The two
+        // confirmation questions draw their buttons as type "confirm"; a "yes"
+        // that arrives labelled as anything else - a stale button, or one from
+        // another question - is not an answer to this one, and is dropped
+        // rather than read as consent.
+        if ($choiceValue !== '' && in_array($state['step'], ['confirm', 'cancel_confirm'], true) && $choiceType !== 'confirm') {
+            $choiceValue = '';
+        }
 
         if ($starting) {
             // Open on intent, not on a field - the patient says what they want
@@ -196,26 +236,32 @@ class ChatController extends Controller
             }
         } else {
             $stateBefore = $state;
-            $replies = $this->handleAnswer($text, $choiceValue, $source, $state, $client, $authenticator, $otp);
+            $language = $this->language();
 
-            // The deterministic matcher above is the primary path and has just
-            // failed to move the conversation on. Ask Grok what the sentence
-            // meant, then run THE SAME matchers again with its interpretation.
-            // Grok never resolves anything itself - it only rephrases the
-            // patient into something the existing matchers already understand.
-            // A handler can answer without moving the conversation on - showing
-            // the slot list again, for instance. That is a complete answer, so
-            // the LLM must not be asked to interpret the same message a second
-            // time: one message, one response path.
-            $handledByRules = !empty($state['_handled']);
-            unset($state['_handled']);
+            // Free text on a step the AI may interpret. A chip is exactly what
+            // the patient meant, so it never goes to the AI, and registration
+            // steps are not on the eligible list at all.
+            $aiEligible = $text !== '' && $choiceValue === '' && $this->nluEligible($stepBefore);
 
-            if (!$handledByRules
-                && $state['step'] === $stepBefore
-                && $text !== ''
-                && $choiceValue === ''          // a chip selection never reaches the LLM
-                && $this->nluEligible($stepBefore)) {
+            // AI first, for both languages, unless a deterministic rule owns
+            // the message (a plain yes or no, "start over", "show me more",
+            // "are there other doctors", a follow-up about the appointment list,
+            // an ambiguous number...). Those need no model, and a model could
+            // only get them wrong.
+            //
+            // ai_first = false is the rollback: English goes back to trying the
+            // rules first, German stays as it has always been - AI first, since
+            // the rules only know English.
+            $ruleOwned = $aiEligible && $this->deterministicShortcut($stepBefore, $text, $stateBefore);
+            $aiFirst = $aiEligible && $this->aiFirst($language) && !$ruleOwned;
 
+            $nlu = null;
+            $aiTried = false;
+            $replies = null;
+            $rulesOwned = false;
+
+            if ($aiFirst) {
+                $aiTried = true;
                 $nlu = $grok->interpret(
                     $stepBefore,
                     $this->nluOptions($stateBefore),
@@ -223,41 +269,112 @@ class ChatController extends Controller
                     // One line of context: the question the patient is replying
                     // to. Never the transcript, never patient details.
                     $stateBefore['last_assistant'] ?? null,
-                    $this->nluContext($stateBefore)
+                    $this->nluContext($stateBefore),
+                    $language
                 );
+
                 $retries = $nlu ? $this->nluInput($stepBefore, $nlu) : [];
 
-                foreach ($retries as $index => $retry) {
-                    if ($index === 0) {
-                        $state = $stateBefore;   // discard the failed attempt cleanly
-                        $replies = [];
-                    }
+                if ($retries) {
+                    $replies = $this->replayInterpretation($retries, $stateBefore, $state, $source, $client, $authenticator, $otp);
 
-                    $before = $state['step'];
-                    $replies = array_merge(
-                        $replies,
-                        $this->handleAnswer($retry, '', $source, $state, $client, $authenticator, $otp)
+                    if ($state['step'] === $stepBefore && empty($state['_handled']) && empty($state['_no_prompt'])) {
+                        // The interpretation did not move the conversation on,
+                        // so it did not help. Start the turn again on the rules.
+                        $state = $stateBefore;
+                        $replies = null;
+                    } elseif (empty($state['slot_hint'])) {
+                        // "Dr Patel tomorrow morning" names a day as well as a
+                        // doctor. The rules read the day from the patient's own
+                        // words when they can (English); the AI's reading of it
+                        // covers what they cannot (German).
+                        $hint = $language === 'de'
+                            ? ($this->interpretedSlotHint($nlu) ?: null)
+                            : ($this->slotHint($text) ?: $this->interpretedSlotHint($nlu));
+
+                        if ($hint) {
+                            $state['slot_hint'] = $hint;
+                        }
+                    }
+                }
+            }
+
+            if ($replies === null) {
+                $state = $stateBefore;
+                $replies = $this->handleAnswer($text, $choiceValue, $source, $state, $client, $authenticator, $otp);
+
+                // A handler can answer without moving the conversation on -
+                // showing the slot list again, for instance. That is a complete
+                // answer, so the AI must not be asked to interpret the same
+                // message a second time: one message, one response path.
+                $rulesOwned = !empty($state['_handled']);
+                unset($state['_handled']);
+
+                // Rules first (ai_first = false, English): the rules have just
+                // failed to move the conversation on, so ask the AI what the
+                // sentence meant and run THE SAME matchers on its answer. The AI
+                // never resolves anything itself - it only rephrases the patient
+                // into something the existing matchers already understand.
+                // Not for a message a deterministic rule owns: "start over" can
+                // leave the step where it was, but it has been answered.
+                if (!$aiTried
+                    && !$rulesOwned
+                    && !$ruleOwned
+                    && $state['step'] === $stepBefore
+                    && $aiEligible) {
+                    $aiTried = true;
+
+                    $nlu = $grok->interpret(
+                        $stepBefore,
+                        $this->nluOptions($stateBefore),
+                        $text,
+                        $stateBefore['last_assistant'] ?? null,
+                        $this->nluContext($stateBefore),
+                        $language
                     );
+                    $retries = $nlu ? $this->nluInput($stepBefore, $nlu) : [];
 
-                    // Stop as soon as a follow-up stops making progress.
-                    if ($state['step'] === $before) {
-                        break;
+                    if ($retries) {
+                        $replies = $this->replayInterpretation($retries, $stateBefore, $state, $source, $client, $authenticator, $otp);
+
+                        // The retry replays a normalised phrase such as "Dr
+                        // Gunnar Gauff", so anything else said in the same
+                        // breath - "for Friday" - would be lost. Keep it for
+                        // the slot step.
+                        if (empty($state['slot_hint']) && ($hint = $this->slotHint($text))) {
+                            $state['slot_hint'] = $hint;
+                        }
                     }
                 }
+            }
 
-                // The retry replays a normalised phrase such as "Dr Gunnar
-                // Gauff", so anything else said in the same breath - "for
-                // Friday" - would be lost. Keep it for the slot step.
-                if ($retries && empty($state['slot_hint']) && ($hint = $this->slotHint($text))) {
-                    $state['slot_hint'] = $hint;
-                }
+            // The AI could not be used and nothing else moved the conversation
+            // on. Saying so beats a re-ask that blames the patient for being
+            // misunderstood - but ONLY then: if the rules answered, or the turn
+            // went somewhere, there is nothing to apologise for. A message the
+            // AI merely could not read ("unrecognized") is not an outage either.
+            // Buttons keep working in every case.
+            $answered = $rulesOwned || !empty($state['_handled']) || !empty($state['_no_prompt']);
+
+            if ($aiTried && $grok->unavailable() && $state['step'] === $stepBefore && !$answered) {
+                $replies = [$this->say(
+                    $grok->outcome() === 'rate_limited' ? self::AI_BUSY : self::AI_UNAVAILABLE,
+                    'error'
+                )];
             }
         }
 
         // "Show more" only extends the chip list; repeating the question under it
         // would read like the assistant forgot it had asked.
         $suppressPrompt = !empty($state['_no_prompt']);
-        unset($state['_no_prompt'], $state['_handled']);
+
+        // A booking was confirmed, or the patient was said goodbye to, and the
+        // conversation ends with it. Which one decides what is said.
+        $endKind = (string) ($state['_ended'] ?? '');
+        $ended = !$starting && $endKind !== '';
+
+        // A consent only lasts for the answer that gave it.
+        unset($state['_no_prompt'], $state['_handled'], $state['_consent'], $state['_ended']);
 
         // A new question starts from the first page of chips again.
         if ($state['step'] !== $stepBefore) {
@@ -279,8 +396,15 @@ class ChatController extends Controller
 
         // A step with no question of its own - the closed conversation - must
         // not add an empty bubble.
-        if (!$rejected && !$alreadyDone && !$suppressPrompt && trim((string) $prompt['text']) !== '') {
+        if (!$rejected && !$alreadyDone && !$suppressPrompt && !$ended && trim((string) $prompt['text']) !== '') {
             $replies[] = $this->say($prompt['text']);
+        }
+
+        // "Is there anything else?" would invite a conversation that is over.
+        // After a goodbye ("no thanks") the farewell has already been said, so
+        // only the fact that it has ended is added.
+        if ($ended) {
+            $replies[] = $this->say($endKind === 'goodbye' ? self::ENDED_NOTICE : self::GOODBYE);
         }
 
         // Remember only the last thing the assistant said, so the next message
@@ -289,16 +413,31 @@ class ChatController extends Controller
         $last = end($replies);
         $state['last_assistant'] = is_array($last) ? ($last['text'] ?? null) : null;
 
-        $this->save($state);
-        $this->rememberForEdit($starting, $text, $choiceValue, $source, $stateBefore ?? null, $state);
+        if ($ended) {
+            // Nothing about this patient outlives the booking: not who they
+            // are, not their token, not what they chose. The language they
+            // picked is kept separately, so the next person starts in it.
+            session()->forget(self::SESSION_KEY);
+            session()->forget(self::UNDO_KEY);
+        } else {
+            $this->save($state);
+            $this->rememberForEdit($starting, $text, $choiceValue, $source, $stateBefore ?? null, $state);
+        }
 
-        return response()->json([
+        return response()->json($this->localize([
             'messages' => $replies,
             // Whether the browser may offer "edit" on the message just sent.
             // The server decides: the snapshot either exists or it does not.
-            'can_edit' => session()->has(self::UNDO_KEY),
+            'can_edit' => !$ended && session()->has(self::UNDO_KEY),
             'options' => $alreadyDone ? null : ($prompt['options'] ?? null),
-            'input' => $prompt['input'] ?? ['enabled' => true, 'placeholder' => 'Message PureMed Assistant'],
+            // After the goodbye there is nothing left to type into.
+            'input' => $ended
+                ? ['enabled' => false, 'placeholder' => 'This conversation has ended.']
+                : ($prompt['input'] ?? ['enabled' => true, 'placeholder' => 'Message PureMed Assistant']),
+            // Set only when the conversation has ended: the page clears itself
+            // and returns to the start screen after this many seconds.
+            'ended' => $ended,
+            'reset_after' => $ended ? max(5, (int) config('ai-assistant.end_reset_seconds', 60)) : null,
             // What the browser should narrate WHILE the next answer is being
             // processed. Sent ahead of time because the API calls happen before
             // the next response exists - otherwise the status would appear
@@ -306,7 +445,247 @@ class ChatController extends Controller
             'pending' => $this->pendingFor($state['step']),
             'step' => $state['step'],
             'done' => $state['step'] === 'done',
-        ]);
+        ]));
+    }
+
+    /**
+     * Should free text go to the AI before the rules?
+     *
+     * German always does - the rules only know English. English does while the
+     * ai_first flag is on, and falls back to rules-first when it is off.
+     */
+    private function aiFirst(string $language): bool
+    {
+        return $language === 'de' || (bool) config('ai-assistant.ai_first', true);
+    }
+
+    /**
+     * Is this message one a deterministic rule owns outright?
+     *
+     * For these the rules are exact and a model can only be a worse answer, a
+     * wasted second and a slice of a shared token budget. Every check here is a
+     * pure function of the text and the state: nothing is changed, nothing is
+     * sent anywhere.
+     *
+     * Deliberately NOT here: picking a doctor, a day or a time, "another
+     * doctor", "show me the times". Those are the natural language the AI is
+     * for; the rules remain the fallback if it cannot read them.
+     */
+    private function deterministicShortcut(string $step, string $text, array $state): bool
+    {
+        // A bare, unmistakable yes or no to a yes/no question.
+        if ($this->isPlainConfirmation($step, $text)) {
+            return true;
+        }
+
+        if ($this->wantsRestart($text) || $this->wantsMore($text) || $this->abandonsBooking($text)) {
+            return true;
+        }
+
+        // "Are there other doctors?" is answered from PureMed's own list.
+        if ($step === 'doctor' && $this->asksForOtherDoctors($text)) {
+            return true;
+        }
+
+        if ($step === 'appointments') {
+            // "No thanks, that's all."
+            if ($this->saidNothingElse($text)) {
+                return true;
+            }
+
+            // "Past appointments".
+            if ($this->wantsPast($text)) {
+                return true;
+            }
+
+            // "What about the second one?" - answered from the list already
+            // shown. Left to the AI it was read as a request to cancel.
+            $held = array_values($state['appointments_context'] ?? []);
+
+            if ($held && $this->appointmentReference($text, count($held), (int) ($state['discussed_appointment'] ?? 0)) !== null) {
+                return true;
+            }
+        }
+
+        // "11" at the time question: the clarification the rules ask - "did you
+        // mean the 11th time, or 11 o'clock?" - is on purpose, and a model would
+        // turn the bare number into a time or a position without asking.
+        if ($step === 'slot_time' && $this->clarifyAmbiguousNumber($state, $text) !== null) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Run the phrases the AI came up with through the ordinary matchers.
+     *
+     * One sentence can answer two questions - "tomorrow morning" picks the day,
+     * then the time - so this is a short sequence rather than a single answer.
+     * It starts again from the state as the message found it, so nothing a
+     * failed earlier attempt did is carried over.
+     *
+     * @param  array<int, string>  $retries
+     * @return array<int, array>
+     */
+    private function replayInterpretation(
+        array $retries,
+        array $stateBefore,
+        array &$state,
+        string $source,
+        PureMedApiClient $client,
+        PatientAuthenticator $authenticator,
+        ?OtpService $otp
+    ): array {
+        $replies = [];
+
+        foreach ($retries as $index => $retry) {
+            if ($index === 0) {
+                $state = $stateBefore;   // discard the failed attempt cleanly
+            }
+
+            $before = $state['step'];
+            $replies = array_merge(
+                $replies,
+                $this->handleAnswer($retry, '', $source, $state, $client, $authenticator, $otp)
+            );
+
+            // Stop as soon as a follow-up stops making progress.
+            if ($state['step'] === $before) {
+                break;
+            }
+        }
+
+        return $replies;
+    }
+
+    /**
+     * A bare, unmistakable yes or no to a yes/no question. The rules read it
+     * exactly, so it never needs the AI.
+     */
+    private function isPlainConfirmation(string $step, string $text): bool
+    {
+        if (!in_array($step, ['confirm', 'cancel_confirm'], true)) {
+            return false;
+        }
+
+        return app(ConsentRules::class)->isClearConsent($text, $this->language(), $step === 'cancel_confirm')
+            || (mb_strlen($text) <= 30 && $this->saidNo('', $text));
+    }
+
+    /**
+     * The day and time the AI heard in a booking request, in English terms.
+     *
+     * Kept so "Termin bei Dr. Patel morgen Vormittag" still carries the day and
+     * the part of the day to the slot step once the doctor has been chosen -
+     * the rules cannot read the German original.
+     *
+     * @param  array<string, mixed>|null  $nlu
+     */
+    private function interpretedSlotHint(?array $nlu): ?string
+    {
+        if (!$nlu) {
+            return null;
+        }
+
+        $hint = trim(implode(' ', array_filter([
+            $nlu['date'] ?? null,
+            $nlu['time'] ?? ($nlu['time_preference'] ?? null),
+        ])));
+
+        return $hint === '' ? null : $hint;
+    }
+
+    /* -----------------------------------------------------------------
+    |  Language
+    ------------------------------------------------------------------*/
+
+    /** 'en' or 'de' - what the patient chose, or the configured default. */
+    private function language(): string
+    {
+        $chosen = session(self::LANGUAGE_KEY);
+        $allowed = (array) config('ai-assistant.languages', ['en', 'de']);
+
+        if (is_string($chosen) && in_array($chosen, $allowed, true)) {
+            return $chosen;
+        }
+
+        $default = (string) config('ai-assistant.default_language', 'en');
+
+        return in_array($default, $allowed, true) ? $default : 'en';
+    }
+
+    /** The page sends its language with every request; the latest one wins. */
+    private function rememberLanguage(Request $request): void
+    {
+        $lang = (string) $request->input('lang', '');
+
+        if (in_array($lang, (array) config('ai-assistant.languages', ['en', 'de']), true)) {
+            session([self::LANGUAGE_KEY => $lang]);
+        }
+    }
+
+    /**
+     * Put a response into the patient's language on its way out.
+     *
+     * The conversation runs and stores everything in English; only what the
+     * patient sees and hears is translated, and only here. Doctor names,
+     * appointment types, dates and anything else PureMed supplied pass through
+     * untouched because no translation matches them.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function localize(array $payload): array
+    {
+        $lang = $this->language();
+
+        if ($lang === 'en') {
+            return $payload;
+        }
+
+        $t = app(Translator::class);
+
+        foreach ($payload['messages'] ?? [] as $i => $message) {
+            if (is_array($message) && isset($message['text'])) {
+                $payload['messages'][$i]['text'] = $t->translate((string) $message['text'], $lang);
+            }
+        }
+
+        if (!empty($payload['options']) && is_array($payload['options'])) {
+            foreach ($payload['options']['items'] ?? [] as $i => $item) {
+                foreach (['title', 'subtitle'] as $field) {
+                    if (isset($item[$field]) && is_string($item[$field])) {
+                        $payload['options']['items'][$i][$field] = $t->translate($item[$field], $lang);
+                    }
+                }
+            }
+
+            if (in_array($payload['options']['type'] ?? '', ['confirm', 'booked'], true)
+                && is_array($payload['options']['summary'] ?? null)) {
+                $summary = [];
+
+                foreach ($payload['options']['summary'] as $key => $value) {
+                    $summary[$t->summaryKey((string) $key, $lang)] = $value;
+                }
+
+                $payload['options']['summary'] = $summary;
+            }
+        }
+
+        if (isset($payload['input']['placeholder'])) {
+            $payload['input']['placeholder'] = $t->translate((string) $payload['input']['placeholder'], $lang);
+        }
+
+        if (!empty($payload['pending']) && is_array($payload['pending'])) {
+            $payload['pending'] = array_map(fn ($line) => $t->translate((string) $line, $lang), $payload['pending']);
+        }
+
+        if (isset($payload['error'])) {
+            $payload['error'] = $t->translate((string) $payload['error'], $lang);
+        }
+
+        return $payload;
     }
 
     /**
@@ -330,7 +709,10 @@ class ChatController extends Controller
         $request->validate([
             'text' => ['required', 'string', 'max:500'],
             'source' => ['nullable', 'string', 'in:voice,text'],
+            'lang' => ['nullable', 'string', 'in:en,de'],
         ]);
+
+        $this->rememberLanguage($request);
 
         $snapshot = session(self::UNDO_KEY);
         $current = $this->state();
@@ -370,7 +752,7 @@ class ChatController extends Controller
     {
         session()->forget(self::UNDO_KEY);
 
-        return response()->json(['can_edit' => false, 'error' => $message], 409);
+        return response()->json($this->localize(['can_edit' => false, 'error' => $message]), 409);
     }
 
     /**
@@ -413,15 +795,18 @@ class ChatController extends Controller
         ]]);
     }
 
-    public function reset(): JsonResponse
+    public function reset(Request $request): JsonResponse
     {
+        $request->validate(['lang' => ['nullable', 'string', 'in:en,de']]);
+        $this->rememberLanguage($request);
+
         session()->forget(self::SESSION_KEY);
         session()->forget(self::UNDO_KEY);
 
         $state = $this->state();
         $prompt = $this->promptFor($state);
 
-        return response()->json([
+        return response()->json($this->localize([
             'messages' => [
                 // The header button clears the patient too, so be explicit that
                 // details will be collected from scratch.
@@ -433,7 +818,7 @@ class ChatController extends Controller
             'pending' => $this->pendingFor($state['step']),
             'step' => $state['step'],
             'done' => false,
-        ]);
+        ]));
     }
 
     /* -----------------------------------------------------------------
@@ -1121,7 +1506,7 @@ class ChatController extends Controller
                 // "sorry, can you book for 13 August" turns this down AND says
                 // what to do instead. Backing out to the day list would throw
                 // the day away and make the patient say it a second time.
-                if ($choiceValue === '' && !$this->saidYes($choiceValue, $text)) {
+                if ($choiceValue === '' && !$this->consents('book', $choiceValue, $text, $state)) {
                     // "the 11th one" is a position in the list, not the 11th of
                     // the month. Without this the day matcher claimed it first
                     // and quietly moved the appointment to another date.
@@ -1215,8 +1600,19 @@ class ChatController extends Controller
                 // explicit yes. Anything else leaves the step unchanged, which
                 // lets the NLU fallback interpret it and, failing that, re-asks
                 // with the buttons.
-                if ($this->saidYes($choiceValue, $text)) {
+                if ($this->consents('book', $choiceValue, $text, $state)) {
+                    $state['_consent'] = 'book';
+
                     return $this->book($state, $client);
+                }
+
+                // It sounds like agreement, but not clearly enough to book on:
+                // "yes but not that one", "yes if it's cheap", a long ramble.
+                // Ask once more instead of guessing; the buttons are still there.
+                if ($choiceValue === '' && $this->saidYes('', $text)) {
+                    $state['_handled'] = true;
+
+                    return [$this->say('I want to be sure before I book anything. Please answer yes or no, or use the buttons.')];
                 }
 
                 return [];
@@ -1240,23 +1636,32 @@ class ChatController extends Controller
                 return [];
 
             case 'cancel_confirm':
-                // "cancel" answering "shall I cancel this appointment?" is a
-                // yes. Only here - anywhere else the word STARTS a cancellation
-                // rather than confirming one, so it must not become a general
-                // agreement. A refusal still wins: "no, don't cancel" keeps it.
-                $confirmsCancel = $choiceValue === ''
-                    && !$this->saidNo($choiceValue, $text)
-                    && preg_match('/\b(cancel|remove|delete)\b/u', $this->normalizeText($text)) === 1;
+                // Cancelling needs a clear yes, decided by the same word lists as
+                // booking, with "cancel it" and "stornieren" counting as one too.
+                // The old rule - any sentence containing the word "cancel" - let
+                // "can you cancel the other one instead" through.
+                if ($this->consents('cancel', $choiceValue, $text, $state)) {
+                    $state['_consent'] = 'cancel';
 
-                if (!$this->saidYes($choiceValue, $text) && !$confirmsCancel) {
-                    $state['cancel_target'] = null;
-                    $state['rebook_after_cancel'] = false;
-                    $state['step'] = $state['appointment'] ? 'done' : 'doctor';
-
-                    return [$this->say("I've kept that appointment. Nothing has been cancelled.")];
+                    return $this->cancelAppointment($state, $client);
                 }
 
-                return $this->cancelAppointment($state, $client);
+                // Loosely agreeing but not clearly: ask again, keep the appointment
+                // for now. A plain no, or anything that is not agreement at all,
+                // keeps it for good, as before.
+                $cancelVerb = preg_match('/\b(cancel|remove|delete|stornieren|absagen)\b/u', $this->normalizeText($text)) === 1;
+
+                if ($choiceValue === '' && !$this->saidNo('', $text) && ($this->saidYes('', $text) || $cancelVerb)) {
+                    $state['_handled'] = true;
+
+                    return [$this->say('I want to be sure before I cancel anything. Please answer yes or no, or use the buttons.')];
+                }
+
+                $state['cancel_target'] = null;
+                $state['rebook_after_cancel'] = false;
+                $state['step'] = $state['appointment'] ? 'done' : 'doctor';
+
+                return [$this->say("I've kept that appointment. Nothing has been cancelled.")];
 
             case 'appointments':
                 if ($choiceValue === 'past' || $this->wantsPast($text)) {
@@ -1868,6 +2273,12 @@ class ChatController extends Controller
 
     private function book(array &$state, PureMedApiClient $client): array
     {
+        // Defence in depth. Whatever path led here, nothing is booked without a
+        // consent recorded by consents() for THIS answer.
+        if (!$this->takeConsent($state, 'book')) {
+            return [$this->say('I need a clear yes before I book anything. Shall I book it?', 'error')];
+        }
+
         // The last gate before the only irreversible step in the conversation.
         if ($refusal = $this->refuseUnsafeBooking($state, $client)) {
             return $refusal;
@@ -1911,6 +2322,13 @@ class ChatController extends Controller
         // than reused for a second booking.
         $state['booking_window'] = null;
         $state['step'] = 'done';
+
+        // The visit is done. converse() ends the conversation once this turn has
+        // been answered: the card and a goodbye are shown, and nothing about the
+        // patient is kept. Switched off with ai-assistant.end_after_booking.
+        if (config('ai-assistant.end_after_booking', true)) {
+            $state['_ended'] = 'booking';
+        }
 
         return [
             $this->say("All done! Your appointment is confirmed."),
@@ -2298,6 +2716,10 @@ class ChatController extends Controller
      */
     private function cancelAppointment(array &$state, PureMedApiClient $client): array
     {
+        if (!$this->takeConsent($state, 'cancel')) {
+            return [$this->say('I need a clear yes before I cancel anything. Shall I cancel this appointment?', 'error')];
+        }
+
         $target = $state['cancel_target'];
 
         $result = $client->cancelAppointment($state['token'], [
@@ -2670,7 +3092,7 @@ class ChatController extends Controller
         return array_map(fn ($appointment) => [
             'value' => (string) $appointment['id'],
             'title' => $this->appointmentLabel($appointment),
-            'subtitle' => trim(($appointment['appointment_type_name'] ?? '') . ' - ' . ($appointment['doctor_name'] ?? ''), ' -'),
+            'subtitle' => trim(($appointment['appointment_type_name'] ?? '') . ' - ' . Str::title((string) ($appointment['doctor_name'] ?? '')), ' -'),
         ], $appointments);
     }
 
@@ -2726,7 +3148,7 @@ class ChatController extends Controller
 
         return [
             'Appointment' => $appointment['appointment_type_name'] ?? '',
-            'Doctor' => $appointment['doctor_name'] ?? '',
+            'Doctor' => Str::title((string) ($appointment['doctor_name'] ?? '')),
             'When' => $this->appointmentLabel($appointment),
         ];
     }
@@ -3465,7 +3887,8 @@ class ChatController extends Controller
         }
 
         if (preg_match('/\b(never mind|nevermind|forget it|forget about it|leave it|not interested'
-            . '|changed my mind|change my mind)\b/u', $value) === 1) {
+            . '|changed my mind|change my mind'
+            . '|vergiss es|schon gut|doch nicht|lassen wir es|kein interesse|hat sich erledigt)\b/u', $value) === 1) {
             return true;
         }
 
@@ -3629,7 +4052,8 @@ class ChatController extends Controller
     {
         $value = mb_strtolower(trim($text));
 
-        return $value !== '' && preg_match('/\b(start over|start again|restart|reset|book another)\b/', $value) === 1;
+        return $value !== '' && (preg_match('/\b(start over|start again|restart|reset|book another)\b/', $value) === 1
+            || preg_match('/\b(neu starten|neustart|von vorn|von vorne|zurücksetzen|noch einen buchen|noch einen termin)\b/u', $value) === 1);
     }
 
     private function wantsAnotherDoctor(string $choiceValue, string $text): bool
@@ -3862,6 +4286,12 @@ class ChatController extends Controller
         // be the very thing the patient just declined.
         $state['_no_prompt'] = true;
         $state['_handled'] = true;
+
+        // Said goodbye to: the conversation is over, and so is the session.
+        // converse() clears it once this turn has been answered.
+        if (config('ai-assistant.end_after_goodbye', true)) {
+            $state['_ended'] = 'goodbye';
+        }
 
         return [$this->say($name
             ? "You're welcome, " . $name . '. Have a great day!'
@@ -4349,6 +4779,12 @@ class ChatController extends Controller
             return true;
         }
 
+        // The same refusals in German. A separate pattern because it needs /u
+        // for the umlauts, which the English ones above were never written for.
+        if (preg_match('/\b(nein|nee|nö|noe|nicht|kein|keine|falsch|abbrechen)\b/u', $value) === 1) {
+            return true;
+        }
+
         // The whole answer is the refusal: "wrong", "that's wrong",
         // "incorrect", "a mistake". Anchored on purpose. "you have taken wrong
         // time I said 17" also contains "wrong", but it names a new time and
@@ -4363,7 +4799,8 @@ class ChatController extends Controller
             return false;
         }
 
-        return preg_match('/\b(n|another|other|change|different|later|wait|keep it|keep them all|pick another)\b/', $value) === 1;
+        return preg_match('/\b(n|another|other|change|different|later|wait|keep it|keep them all|pick another)\b/', $value) === 1
+            || preg_match('/\b(andere|anderen|anderes|ändern|aendern|später|spaeter|warten|behalten|stopp)\b/u', $value) === 1;
     }
 
     /**
@@ -4392,7 +4829,86 @@ class ChatController extends Controller
         return preg_match(
             '/\b(yes|y|yeah|yep|yup|ok|okay|sure|confirm|confirmed|correct|right|go ahead|book it|do it|fine|works|sounds good|please do|perfect|lets do it)\b/',
             $value
-        ) === 1;
+        ) === 1
+            // German. "buchen" and "absagen" alone are deliberately NOT here: a
+            // bare "Termin buchen" is a request, and must never count as agreeing.
+            || preg_match(
+                '/\b(ja|jawohl|jep|jup|klar|gerne|genau|richtig|stimmt|korrekt|in ordnung|einverstanden|passt|sicher|natürlich|natuerlich|selbstverständlich|bestätigt|bestaetigt)\b/u',
+                $value
+            ) === 1;
+    }
+
+    /**
+     * Has the patient clearly agreed to book ('book') or to cancel ('cancel')?
+     *
+     * The ONLY gate in front of book() and cancelAppointment(). Two things must
+     * both hold:
+     *  - the conversation is really at that question, with what it asks about
+     *    actually chosen. A "yes" that arrives anywhere else, or before there
+     *    is anything to say yes to, is not consent;
+     *  - the answer is a chip tap on that question, or a short free-text answer
+     *    that ConsentRules recognises as a plain yes in the patient's language.
+     *
+     * The AI plays no part: its reading of a sentence, and its confidence in
+     * that reading, are never consulted.
+     */
+    private function consents(string $kind, string $choiceValue, string $text, array $state): bool
+    {
+        if (!$this->consentContextValid($kind, $state)) {
+            return false;
+        }
+
+        // A button is exactly what the patient chose - but only the "yes" one.
+        if ($choiceValue !== '') {
+            return $choiceValue === 'yes';
+        }
+
+        return app(ConsentRules::class)->isClearConsent($text, $this->language(), $kind === 'cancel');
+    }
+
+    /** Is there a pending booking, or a pending cancellation, to agree to? */
+    private function consentContextValid(string $kind, array $state): bool
+    {
+        if ($kind === 'book') {
+            $slot = $state['slot'] ?? null;
+
+            return ($state['step'] ?? '') === 'confirm'
+                && is_array($slot)
+                && !empty($slot['slot_date'])
+                && !empty($slot['time'])
+                && isset($slot['time_slot_id'])
+                && !empty($state['doctor']['id'])
+                && !empty($state['appointment_type']['id'])
+                && !empty($state['patient_id'])
+                && !empty($state['token']);
+        }
+
+        $target = $state['cancel_target'] ?? null;
+
+        return ($state['step'] ?? '') === 'cancel_confirm'
+            && is_array($target)
+            && isset($target['id'])
+            && !empty($state['patient_id'])
+            && !empty($state['token']);
+    }
+
+    /**
+     * Spend the consent given for this answer. It can be used once, for the
+     * action it was given for, and only if consents() recorded it.
+     */
+    private function takeConsent(array &$state, string $kind): bool
+    {
+        $given = ($state['_consent'] ?? null) === $kind;
+        unset($state['_consent']);
+
+        if (!$given) {
+            Log::warning('AI assistant: refused to act without recorded consent', [
+                'action' => $kind,
+                'step' => $state['step'] ?? null,
+            ]);
+        }
+
+        return $given;
     }
 
     /* -----------------------------------------------------------------
@@ -4417,7 +4933,8 @@ class ChatController extends Controller
         // reached the word cap below and was turned away as not a name.
         $value = preg_replace(
             "/^(?:my\s+(?:first\s+|last\s+|sur|full\s+|complete\s+|whole\s+)?name(?:'s|\s+is)?"
-            . "|i\s*am|i'm|it'?s|this\s+is|call\s+me)\s+/iu",
+            . "|i\s*am|i'm|it'?s|this\s+is|call\s+me"
+            . "|mein\s+(?:vor|nach|voll\w*\s+)?name\s+ist|ich\s+hei(?:ß|ss)e|ich\s+bin|das\s+ist)\s+/iu",
             '',
             $value
         );
@@ -4670,6 +5187,12 @@ class ChatController extends Controller
             ' period ' => '.',
             ' full stop ' => '.',
             ' at ' => '@',
+            // German: "punkt", "ät" and "klammeraffe" are how it is said aloud.
+            ' bindestrich ' => '-',
+            ' unterstrich ' => '_',
+            ' klammeraffe ' => '@',
+            ' ät ' => '@',
+            ' punkt ' => '.',
         ];
 
         // Providers are often transcribed as two words ("g mail", "hot mail").
@@ -4887,13 +5410,37 @@ class ChatController extends Controller
             || preg_match('/\b(?:' . $months . ')[a-z]*\b[^0-9]{0,12}\b\d{1,2}\b/iu', $candidate) === 1;
     }
 
+    /**
+     * "15. März 1990" read as "15 March 1990", so the formats below, which know
+     * English month names, apply to a German answer unchanged. The full stop
+     * after the day is how German writes an ordinal and is dropped with it.
+     */
+    private function germanMonthsToEnglish(string $value): string
+    {
+        $months = [
+            'januar' => 'January', 'jänner' => 'January', 'jaenner' => 'January', 'februar' => 'February',
+            'märz' => 'March', 'maerz' => 'March', 'april' => 'April', 'mai' => 'May', 'juni' => 'June',
+            'juli' => 'July', 'august' => 'August', 'september' => 'September', 'oktober' => 'October',
+            'november' => 'November', 'dezember' => 'December', 'okt' => 'Oct', 'dez' => 'Dec',
+            'mär' => 'Mar', 'mrz' => 'Mar',
+        ];
+
+        $value = preg_replace('/\b(\d{1,2})\.\s*(?=\p{L})/u', '$1 ', $value);
+
+        return preg_replace_callback(
+            '/\b(' . implode('|', array_keys($months)) . ')\b\.?/iu',
+            static fn (array $m): string => $months[mb_strtolower($m[1])],
+            $value
+        );
+    }
+
     private function parseBirthDate(string $value): ?Carbon
     {
         // Spacing only, never a rule: what counts as a plausible birth date is
         // decided below exactly as it was. Without this the year in "april1994"
         // has no word boundary in front of it, and the guard turns the answer
         // away before a single format is tried.
-        $value = trim(preg_replace('/\s+/', ' ', $this->spaceAroundMonth($value)));
+        $value = trim(preg_replace('/\s+/', ' ', $this->spaceAroundMonth($this->germanMonthsToEnglish($value))));
 
         if (!preg_match('/\b(18|19|20)\d{2}\b/', $value)) {
             return null;
@@ -5165,7 +5712,7 @@ class ChatController extends Controller
         $birth = (string) ($state['patient']['birth_date'] ?? '');
         $email = $state['patient']['email'] ?? null;
 
-        $result = $otp->send($mobile, $birth, $email);
+        $result = $otp->send($mobile, $birth, $email, '', $this->language());
 
         if (!$result['sent']) {
             // Nothing was sent, so nothing is remembered and nothing is
@@ -5219,7 +5766,8 @@ class ChatController extends Controller
             return false;
         }
 
-        return preg_match('/\b(resend|send it again|send again|another code|new code|didn t get|did not get|not received|never got|nothing came)\b/u', $value) === 1;
+        return preg_match('/\b(resend|send it again|send again|another code|new code|didn t get|did not get|not received|never got|nothing came'
+            . '|nochmal|noch einmal senden|erneut senden|erneut|neuen code|neuer code|code erneut|nicht erhalten|nicht bekommen|nichts bekommen|nicht angekommen)\b/u', $value) === 1;
     }
 
     /**
@@ -5459,9 +6007,13 @@ class ChatController extends Controller
             return ['change appointment type'];
         }
 
+        // The AI may steer a patient AWAY from a booking or cancellation here -
+        // "no", "another time" - but never into one. Agreement is decided by
+        // ConsentRules on the patient's own words; replaying "yes" on the
+        // strength of the model's reading would let its judgement stand in for
+        // theirs.
         if ($step === 'confirm' || $step === 'cancel_confirm') {
             return match ($intent) {
-                'confirm_booking' => ['yes'],
                 'reject_booking', 'change_slot', 'change_date' => ['no'],
                 default => [],
             };

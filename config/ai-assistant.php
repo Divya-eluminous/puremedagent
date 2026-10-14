@@ -98,12 +98,13 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Groq natural language understanding (optional)
+    | Groq natural language understanding
     |--------------------------------------------------------------------------
     |
-    | Used only to interpret what a patient meant on selection steps, and only
-    | after the deterministic matcher has already failed. PureMed remains the
-    | source of truth for doctors, appointment types, availability and booking.
+    | Groq is the assistant's AI backend. It interprets what a patient meant -
+    | in English or German - on selection steps. PureMed remains the source of
+    | truth for doctors, appointment types, availability and booking, and every
+    | answer the model gives is checked against the real options first.
     |
     | The API key is read here and used server side only - it is never passed
     | to a view, to JavaScript or into any API response.
@@ -111,40 +112,66 @@ return [
     | There is deliberately NO default model. Structured outputs with a strict
     | json_schema are only supported by some Groq models (openai/gpt-oss-20b and
     | openai/gpt-oss-120b at the time of writing), so a guessed name would fail
-    | at request time. With GROQ_MODEL or GROQ_API_KEY unset the service stays
-    | disabled and the assistant runs on its existing deterministic matching.
+    | at request time. With GROQ_MODEL or GROQ_API_KEY unset the assistant tells
+    | the patient the AI is temporarily unavailable; buttons keep working.
+    |
+    | NLU_DRIVER is 'groq' by default. Any other value switches the AI off
+    | entirely (used by the automated tests, which run on the rules alone).
     |
     */
-    /*
-    |--------------------------------------------------------------------------
-    | Which NLU backend to use
-    |--------------------------------------------------------------------------
-    |
-    | 'ollama' runs a model locally with no API key and no data leaving this
-    | machine. 'groq' uses the hosted API. Anything else disables NLU entirely,
-    | and the assistant runs on its deterministic matching alone.
-    |
-    */
-    'nlu_driver' => env('NLU_DRIVER', 'ollama'),
+    'nlu_driver' => env('NLU_DRIVER', 'groq'),
 
     /*
     |--------------------------------------------------------------------------
-    | Ollama (local)
+    | Languages
     |--------------------------------------------------------------------------
     |
-    | Local development default. No credentials by design - Ollama listens on
-    | the loopback interface of this machine. The timeout is generous because a
-    | cold model load can take considerably longer than a warm request.
+    | The patient chooses English or German on the page. The choice is sent with
+    | each message and drives the replies, the speech recognition and the voice,
+    | and the language of the verification code messages.
     |
     */
-    'ollama' => [
-        'enabled' => (bool) env('AI_ASSISTANT_NLU_ENABLED', true),
-        'base_url' => env('OLLAMA_BASE_URL', 'http://127.0.0.1:11434'),
-        'model' => env('OLLAMA_MODEL', 'llama3.2:3b'),
-        'timeout' => (int) env('OLLAMA_TIMEOUT', 30),
-        'min_confidence' => (float) env('AI_ASSISTANT_NLU_MIN_CONFIDENCE', 0.7),
-        'max_tokens' => (int) env('OLLAMA_MAX_TOKENS', 200),
-    ],
+    'languages' => ['en', 'de'],
+    'default_language' => env('AI_ASSISTANT_LANGUAGE', 'en'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | AI-first processing (feature flag)
+    |--------------------------------------------------------------------------
+    |
+    | true:  English and German free text on the AI-eligible steps both go to the
+    |        AI first (after the deterministic shortcuts), with the rules as the
+    |        fallback.
+    | false: ROLLBACK. English returns to its original rules-first flow (the AI
+    |        is asked only when the rules could not move the conversation on),
+    |        and German keeps the behaviour it has always had here: AI first.
+    |
+    | Set AI_ASSISTANT_AI_FIRST=false in .env and run `php artisan config:clear`.
+    | NLU_DRIVER=none is the separate, bigger switch: no AI at all.
+    |
+    */
+    'ai_first' => (bool) env('AI_ASSISTANT_AI_FIRST', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | End the conversation after a booking
+    |--------------------------------------------------------------------------
+    |
+    | true:  once an appointment is confirmed the assistant says goodbye, the
+    |        confirmation card stays on screen, and everything the session held
+    |        about the patient is cleared. The page resets to the start screen
+    |        after end_reset_seconds, or sooner if the patient taps the button.
+    | false: the old behaviour - "anything else?", and the patient stays
+    |        identified for the next request (cancel, list, book again).
+    |
+    | A shared screen is the reason: the next person must not inherit the
+    | previous patient's session.
+    |
+    */
+    'end_after_booking' => (bool) env('AI_ASSISTANT_END_AFTER_BOOKING', true),
+    'end_reset_seconds' => (int) env('AI_ASSISTANT_END_RESET_SECONDS', 60),
+    // The same ending after a goodbye ("no thanks, that's all"), whatever came before it.
+    'end_after_goodbye' => (bool) env('AI_ASSISTANT_END_AFTER_GOODBYE', true),
 
     'groq' => [
         'enabled' => (bool) env('AI_ASSISTANT_NLU_ENABLED', true),
@@ -157,6 +184,44 @@ return [
         // 600 still truncated occasionally in testing (json_validate_failed),
         // so the ceiling is 1000. The reply itself is a few dozen tokens - this
         // is headroom for the model's reasoning, not typical spend.
+        // A lower value (about 400) is ONLY to be adopted once the comparison
+        // in tests/ai-assistant/tools/prompt_compare.php has shown no extra
+        // truncation. 1000 is the known-safe setting and the rollback value.
         'max_tokens' => (int) env('GROQ_MAX_TOKENS', 1000),
+
+        // 'current' is the original system prompt and the rollback. 'compact' is
+        // the shorter candidate; it is not the default until the comparison
+        // says it is as accurate and as safe.
+        'prompt' => env('GROQ_PROMPT', 'current'),
+        // Optional. gpt-oss models accept low|medium|high; empty sends nothing,
+        // which is the behaviour the assistant has always had.
+        'reasoning_effort' => env('GROQ_REASONING_EFFORT'),
+
+        /*
+        | Shared rate limit
+        |
+        | These are the limits MEASURED on the key in use (response headers:
+        | x-ratelimit-limit-tokens 8000, x-ratelimit-limit-requests 1000/day).
+        | They are only the starting point: the limiter replaces them with what
+        | the response headers say, and takes the lower of the two. The budget is
+        | one for the whole application - every patient session draws on it.
+        */
+        'rate_limit' => [
+            'enabled' => (bool) env('GROQ_RATE_LIMIT_ENABLED', true),
+            'tokens_per_minute' => (int) env('GROQ_TOKENS_PER_MINUTE', 8000),
+            'requests_per_day' => (int) env('GROQ_REQUESTS_PER_DAY', 1000),
+            // Keep this fraction of the budget unspent, so a burst the limiter
+            // could not foresee does not tip over the line.
+            'safety_margin' => (float) env('GROQ_RATE_SAFETY_MARGIN', 0.1),
+            // A rough size for the prompt, used until a real one is measured.
+            'estimated_prompt_tokens' => (int) env('GROQ_ESTIMATED_PROMPT_TOKENS', 1300),
+            // And a typical reply (measured 138 to 305 tokens), used to reserve budget.
+            'estimated_completion_tokens' => (int) env('GROQ_ESTIMATED_COMPLETION_TOKENS', 350),
+            // How long to wait when Groq refuses without saying for how long.
+            'default_backoff_seconds' => (int) env('GROQ_DEFAULT_BACKOFF', 30),
+            // Never trust a Retry-After longer than this (seconds).
+            'max_backoff_seconds' => (int) env('GROQ_MAX_BACKOFF', 300),
+            'cache_store' => env('GROQ_RATE_CACHE_STORE'),
+        ],
     ],
 ];

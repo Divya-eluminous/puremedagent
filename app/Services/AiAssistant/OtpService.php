@@ -35,9 +35,11 @@ class OtpService
      *
      * @return array{sent: bool, sms: bool, email: bool}
      */
-    public function send(string $mobile, string $birthDate, ?string $email, string $patientName = ''): array
+    public function send(string $mobile, string $birthDate, ?string $email, string $patientName = '', string $language = 'en'): array
     {
         $code = (string) random_int(1000, 9999);
+
+        $this->notifier->useLanguage($language);
 
         $delivered = $this->notifier->send(
             $code,

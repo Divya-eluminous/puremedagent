@@ -2,7 +2,7 @@
 
 namespace App\Services\AiAssistant;
 
-use App\Mail\OtpWebAppointment;
+use App\Mail\AiAssistantOtp;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Throwable;
@@ -21,10 +21,9 @@ use WebSmsCom_TextMessage;
  * dependency on a method inside a web controller would break the first time
  * anyone refactored it, at run time, when a code failed to send.
  *
- * The one thing borrowed from the host application is the OtpWebAppointment
- * mailable, so a patient gets the same email whichever way they book. If that
- * class is ever removed, email delivery here fails loudly rather than sending
- * something different.
+ * The email is the assistant's own AiAssistantOtp mailable, which follows the
+ * language the patient is using; its German wording is the same as the
+ * practice's OtpWebAppointment mail.
  *
  * Both channels are attempted for every code. A patient whose SMS does not
  * arrive - poor signal, a mistyped number - can read the same code in their
@@ -32,6 +31,18 @@ use WebSmsCom_TextMessage;
  */
 class OtpNotifier
 {
+    /** The language of the SMS and the email: 'en' or 'de'. */
+    private string $language = 'en';
+
+    /**
+     * Set before send(). A property rather than an extra argument so the send()
+     * signature stays what existing callers and test doubles already match.
+     */
+    public function useLanguage(string $language): void
+    {
+        $this->language = $language === 'de' ? 'de' : 'en';
+    }
+
     /**
      * Send one code to both channels.
      *
@@ -74,7 +85,9 @@ class OtpNotifier
 
             $message = new WebSmsCom_TextMessage(
                 [$phone],
-                'Ihr Code lautet ' . $code . '. Er ist ' . $this->ttl() . ' Minuten gültig.'
+                $this->language === 'de'
+                    ? 'Ihr Code lautet ' . $code . '. Er ist ' . $this->ttl() . ' Minuten gültig.'
+                    : 'Your code is ' . $code . '. It is valid for ' . $this->ttl() . ' minutes.'
             );
 
             // false: send for real rather than only exercising the interface.
@@ -103,11 +116,11 @@ class OtpNotifier
         try {
             $ordination = config('ordination_name') ? ucfirst((string) config('ordination_name')) : 'Puremed';
 
-            Mail::to($email)->send(new OtpWebAppointment([
+            Mail::to($email)->send(new AiAssistantOtp([
                 'otp_code' => $code,
                 'email' => $email,
                 'patientName' => $patientName,
-            ], $ordination));
+            ], $ordination, $this->language));
 
             $this->note('email', $email, true);
 

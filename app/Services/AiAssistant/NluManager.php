@@ -5,7 +5,7 @@ namespace App\Services\AiAssistant;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Chooses the NLU backend and guards whatever it returns.
+ * Runs the Groq NLU backend and guards whatever it returns.
  *
  * A small local model is a helpful interpreter and an unreliable witness: in
  * testing it named one doctor while giving another one's position, and reported
@@ -17,10 +17,41 @@ use Illuminate\Support\Facades\Log;
  */
 class NluManager implements NluDriver
 {
+    /**
+     * What happened on the most recent interpret(): one of GroqNluService's
+     * OUTCOME_* values, or 'off' when the AI is switched off on purpose, or
+     * 'unrecognized' when the model answered but the guard threw the answer out.
+     */
+    private string $outcome = 'off';
+
     public function __construct(
-        private OllamaNluService $ollama,
         private GroqNluService $groq,
     ) {
+    }
+
+    public function outcome(): string
+    {
+        return $this->outcome;
+    }
+
+    /** Seconds to wait before the AI is worth asking again, after a rate limit. */
+    public function retryAfter(): int
+    {
+        return $this->outcome === GroqNluService::OUTCOME_RATE_LIMITED ? $this->groq->retryAfter() : 0;
+    }
+
+    /**
+     * Did the last interpret() fail because the AI could not be used - not
+     * configured, unreachable, too slow, rate limited, or returning something
+     * that broke the contract?
+     *
+     * A model that answered but had nothing useful to say is NOT unavailable:
+     * that is an ordinary "didn't understand" and the patient is simply asked
+     * again. Always false when NLU is switched off on purpose.
+     */
+    public function unavailable(): bool
+    {
+        return in_array($this->outcome, GroqNluService::FAILURES, true);
     }
 
     public function interpret(
@@ -28,27 +59,37 @@ class NluManager implements NluDriver
         array $optionLabels,
         string $message,
         ?string $previousAssistantMessage = null,
-        array $context = []
+        array $context = [],
+        string $language = 'en'
     ): ?array {
+        $this->outcome = 'off';
+
         $driver = $this->driver();
 
         if (!$driver) {
             return null;
         }
 
-        $result = $driver->interpret($step, $optionLabels, $message, $previousAssistantMessage, $context);
+        $result = $driver->interpret($step, $optionLabels, $message, $previousAssistantMessage, $context, $language);
+        $this->outcome = $this->groq->outcome();
 
         if ($result === null) {
             return null;
         }
 
-        return $this->guard($result, $optionLabels, $step, $context);
+        $guarded = $this->guard($result, $optionLabels, $step, $context);
+
+        if ($guarded === null) {
+            // The model answered; the guard did not accept it.
+            $this->outcome = GroqNluService::OUTCOME_UNRECOGNIZED;
+        }
+
+        return $guarded;
     }
 
     private function driver(): ?NluDriver
     {
         return match ((string) config('ai-assistant.nlu_driver')) {
-            'ollama' => $this->ollama,
             'groq' => $this->groq,
             default => null,
         };
@@ -178,7 +219,11 @@ class NluManager implements NluDriver
         foreach ($labels as $index => $label) {
             $haystack = $this->normalise($label);
 
-            if ($haystack !== '' && (str_contains($haystack, $needle) || str_contains($needle, $haystack))) {
+            // A fragment of fewer than three letters is not a reference to
+            // anyone: "nobody" contains "b", and that is not Dr B.
+            $shorter = min(mb_strlen($haystack), mb_strlen($needle));
+
+            if ($haystack !== '' && $shorter >= 3 && (str_contains($haystack, $needle) || str_contains($needle, $haystack))) {
                 $candidates[] = $index;
             }
         }

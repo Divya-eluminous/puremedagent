@@ -21,6 +21,7 @@ interface NluDriver
      * @param  string  $message  what the patient typed or said
      * @param  array{doctor?: ?string, appointment?: ?string, date?: ?string, time?: ?string}  $context
      *         display labels for what the patient has already chosen - never ids
+     * @param  string  $language  'en' or 'de': the language the patient is writing in
      * @return array{intent: string, entity: ?string, ordinal: ?int, date: ?string,
      *               time_preference: ?string, time: ?string, confidence: float}|null
      */
@@ -29,6 +30,7 @@ interface NluDriver
         array $optionLabels,
         string $message,
         ?string $previousAssistantMessage = null,
-        array $context = []
+        array $context = [],
+        string $language = 'en'
     ): ?array;
 }
