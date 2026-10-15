@@ -258,6 +258,27 @@
     }
     .pm-card.listed b { font-weight: 600; }
 
+    /* The services tick list: checkboxes as in the admin panel, then Continue */
+    .pm-services {
+        display: flex; flex-direction: column; gap: 8px;
+        margin: 2px 0 14px; padding: 12px 14px; max-width: 420px;
+        background: #fff; border: 1px solid #cfe0f7; border-radius: 14px;
+        animation: pmIn 0.22s ease-out;
+    }
+    .pm-service {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 14px; color: var(--pm-blue); cursor: pointer;
+    }
+    .pm-service input { width: 18px; height: 18px; flex: none; cursor: pointer; }
+    .pm-service.locked { cursor: default; opacity: 0.85; pointer-events: none; }
+    .pm-service.locked input { cursor: default; }
+    .pm-services .pm-continue {
+        align-self: flex-start; margin-top: 4px;
+        border: 0; border-radius: 999px; padding: 8px 20px;
+        background: var(--pm-blue); color: #fff; font-size: 13.5px; font-weight: 600; cursor: pointer;
+    }
+    .pm-services .pm-continue:disabled { opacity: 0.45; cursor: default; }
+
     /* Thinking / narration line */
     .pm-status {
         display: flex; align-items: center; gap: 9px;
@@ -739,6 +760,11 @@
 
         if (!options.items || !options.items.length) { return; }
 
+        if (options.type === 'services') {
+            renderServices(options);
+            return;
+        }
+
         var wrap = document.createElement('div');
         wrap.className = 'pm-cards' + (options.type === 'slot_time' ? ' times' : '');
 
@@ -797,6 +823,66 @@
 
         stream.appendChild(wrap);
         currentCards = wrap;
+        scroll();
+    }
+
+    // A tick list rather than chips: the patient may want several. What is sent
+    // back is only the ids that were on the list; the server drops anything else.
+    function renderServices(options) {
+        var box = document.createElement('div');
+        box.className = 'pm-services';
+        var boxes = [];
+
+        options.items.forEach(function (item) {
+            var row = document.createElement('label');
+            row.className = 'pm-service' + (item.locked ? ' locked' : '');
+
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = !!item.checked;
+            cb.value = String(item.value);
+            // The service named like the appointment type cannot be removed: it is
+            // always ticked, ignores clicks (the whole row, label included) and the
+            // keyboard, and puts itself back if anything still unticks it. The
+            // server keeps it in the booking whatever is sent.
+            if (item.locked) {
+                cb.checked = true;
+                cb.tabIndex = -1;
+                cb.setAttribute('aria-disabled', 'true');
+                cb.addEventListener('click', function (e) { e.preventDefault(); cb.checked = true; });
+                cb.addEventListener('keydown', function (e) { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); } });
+                cb.addEventListener('change', function () { cb.checked = true; });
+            }
+
+            var text = document.createElement('span');
+            text.textContent = item.title;
+
+            row.appendChild(cb);
+            row.appendChild(text);
+            box.appendChild(row);
+            boxes.push({ cb: cb, title: item.title, locked: !!item.locked });
+        });
+
+        var go = document.createElement('button');
+        go.type = 'button';
+        go.className = 'pm-continue';
+        go.textContent = options['continue'] || 'Continue';
+
+        go.addEventListener('click', function () {
+            if (busy) { return; }
+
+            removeEditControl();
+            turn = null;
+            editing = false;
+
+            var chosen = boxes.filter(function (b) { return b.locked || b.cb.checked; });
+            addBubble('user', chosen.length ? chosen.map(function (b) { return b.title; }).join(', ') : '-');
+            send({ choice: { type: 'services', value: 'svc:' + chosen.map(function (b) { return b.cb.value; }).join(',') } });
+        });
+
+        box.appendChild(go);
+        stream.appendChild(box);
+        currentCards = box;
         scroll();
     }
 

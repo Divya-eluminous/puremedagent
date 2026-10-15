@@ -18,6 +18,10 @@ return [
 
     'register_endpoint' => env('PUREMED_REGISTER_ENDPOINT', '/api/v3/register'),
     'doctors_endpoint' => env('PUREMED_DOCTORS_ENDPOINT', '/api/v3/get-doctors'),
+    // The services the admin popup offers for an appointment type, as data. Read only.
+    'ai_services_endpoint' => env('PUREMED_AI_SERVICES_ENDPOINT', '/api/v3/ai-assistant/get-appointment-type-services'),
+    // The practice's active country codes, as data. Read only; needs the app key, not a bearer token.
+    'ai_country_codes_endpoint' => env('PUREMED_AI_COUNTRY_CODES_ENDPOINT', '/api/v3/ai-assistant/get-country-codes'),
     'appointment_types_endpoint' => env('PUREMED_APPOINTMENT_TYPES_ENDPOINT', '/api/v3/get-appointment-types'),
     // The practice's own booking window: quarter rules, booking timeframe and
     // the appointment type's optimal_appointment flag all decide what this
@@ -102,6 +106,21 @@ return [
     // done. false = the old behaviour (recognised by mobile number and birth date alone).
     'verify_existing' => (bool) env('AI_ASSISTANT_VERIFY_EXISTING', true),
     'otp_max_resends' => (int) env('AI_ASSISTANT_OTP_RESENDS', 2),
+    // After the appointment type, show the services PureMed offers for it as a tick list
+    // (as the admin popup does) and send the ticked ones with the booking. false = ROLLBACK:
+    // straight to the dates, and the booking carries no exam_ids, as before.
+    'services_step' => (bool) env('AI_ASSISTANT_SERVICES_STEP', true),
+    // A patient the practice does not know is asked which country their mobile number is from (the
+    // practice's own country list), and the code is texted and saved with that country code. false =
+    // ROLLBACK: nothing is asked and default_country_code (0043, Austria) applies, as before.
+    'ask_country' => (bool) env('AI_ASSISTANT_ASK_COUNTRY', true),
+    // An answer that names one option exactly ("Dr Anna Patel", "the second one", "die zweite")
+    // is read by the rules without asking an AI, when the rules provably pick the same option.
+    // false = ROLLBACK: every free-text answer on those steps goes to the AI first, as before.
+    'selection_shortcuts' => (bool) env('AI_ASSISTANT_SELECTION_SHORTCUTS', true),
+    // One log line per turn: how long it took, and how much of that was the AI, PureMed and the
+    // database. Durations, counts and operation names only - never what anyone said.
+    'timing_log' => (bool) env('AI_ASSISTANT_TIMING_LOG', true),
     'default_country' => env('PUREMED_DEFAULT_COUNTRY', 'Austria'),
     'default_postal_code' => env('PUREMED_DEFAULT_POSTAL_CODE', '1010'),
     'login_type' => env('PUREMED_LOGIN_TYPE', 'app'),
@@ -181,7 +200,7 @@ return [
     |
     */
     'end_after_booking' => (bool) env('AI_ASSISTANT_END_AFTER_BOOKING', true),
-    'end_reset_seconds' => (int) env('AI_ASSISTANT_END_RESET_SECONDS', 60),
+    'end_reset_seconds' => (int) env('AI_ASSISTANT_END_RESET_SECONDS', 15),
     // The same ending after a goodbye ("no thanks, that's all"), whatever came before it.
     'end_after_goodbye' => (bool) env('AI_ASSISTANT_END_AFTER_GOODBYE', true),
 

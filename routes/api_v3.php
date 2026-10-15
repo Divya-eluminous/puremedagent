@@ -25,6 +25,8 @@ Route::group(['prefix' => 'v3','middleware' => ['ApiCustomKeyToken']], function(
     Route::get('callback', $PREFIX.'\AuthController@handleGoogleCallback');
 
     Route::post('register', $PREFIX.'\AuthController@registerPatient');
+    // Used only by the AI assistant, before a new patient has a token: the practice's active country codes (read only).
+    Route::post('ai-assistant/get-country-codes', $PREFIX.'\AiAssistantServicesController@countryCodes');
 
     Route::post('signup-send-otp', $PREFIX.'\AuthController@signupSendOtp');
     Route::post('signup-send-otp-new', $PREFIX.'\AuthController@signupSendOtpNew'); //added on 8-jan-23
@@ -212,6 +214,8 @@ Route::group(['prefix' => 'v3','middleware' => ['jwt.verify']], function()use($P
     Route::post('get-setting-beacons', $PREFIX.'\SettingsController@getSettingBeacons');
     Route::post('get-appointment-types', $PREFIX.'\SettingsController@getAppointmentTypes');
     Route::post('get-appointment-types-dynamic', $PREFIX.'\SettingsController@getAppointmentTypesForDynamic');
+    // Used only by the AI assistant: the services the admin popup offers for an appointment type (read only).
+    Route::post('ai-assistant/get-appointment-type-services', $PREFIX.'\AiAssistantServicesController@appointmentTypeServices');
     Route::post('refresh-token', $PREFIX.'\AuthController@refreshToken');
     Route::post('logout', $PREFIX.'\AuthController@logout');
 

@@ -43,12 +43,26 @@ class OtpService
         return $this->guard ??= app(OtpGuard::class);
     }
 
+    /** The code to text a NEW patient's number with: what they chose if it is a real code, else the default. */
+    private function countryCodeFor(?string $chosen): string
+    {
+        $chosen = trim((string) $chosen);
+
+        if (preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $chosen)) {
+            return $chosen;
+        }
+
+        return (string) config('ai-assistant.default_country_code', '0043');
+    }
+
     /**
      * Send a code to both channels, and remember it only if one arrived.
      *
+     * @param  string|null  $countryCode  the country code the patient chose (+43, 0049...); the
+     *                                    configured default when none was, or when it is not a code
      * @return array{sent: bool, sms: bool, email: bool}
      */
-    public function send(string $mobile, string $birthDate, ?string $email, string $patientName = '', string $language = 'en'): array
+    public function send(string $mobile, string $birthDate, ?string $email, string $patientName = '', string $language = 'en', ?string $countryCode = null): array
     {
         // A number can be sent only so many codes an hour, whichever session asks.
         $grant = $this->guard()->reserveSend($mobile);
@@ -64,7 +78,7 @@ class OtpService
         $delivered = $this->notifier->send(
             $code,
             $mobile,
-            (string) config('ai-assistant.default_country_code', '0043'),
+            $this->countryCodeFor($countryCode),
             $email,
             $patientName
         );

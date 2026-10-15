@@ -47,7 +47,7 @@ The file cache is correct for **one application server only**. With several serv
 | `AI_ASSISTANT_AI_FIRST=false` | **Rollback.** English returns to rules-first (the AI is asked only when the rules fail). German keeps its behaviour: AI first. |
 | `AI_ASSISTANT_VERIFY_EXISTING=false` | **Rollback for returning patients.** Back to recognising them by mobile number and date of birth alone, with no code and no signature check. |
 | `NLU_DRIVER=none` | No AI at all. Rules only. (The automated tests run this way.) |
-| `AI_ASSISTANT_END_AFTER_BOOKING=false` | Switches off ending the conversation after a booking. On (default): goodbye, the confirmation card stays, the session is cleared, and the page resets after `AI_ASSISTANT_END_RESET_SECONDS` (60) or when the patient taps "Start a new conversation". |
+| `AI_ASSISTANT_END_AFTER_BOOKING=false` | Switches off ending the conversation after a booking. On (default): goodbye, the confirmation card stays, the session is cleared, and the page resets after `AI_ASSISTANT_END_RESET_SECONDS` (15) or when the patient taps "Start a new conversation". |
 | `AI_ASSISTANT_END_AFTER_GOODBYE=false` | Switches off ending the conversation after a goodbye ("no thanks, that's all"). On (default): the same ending as after a booking. |
 | `GROQ_PROMPT=current` / `compact` | Which system prompt. `current` is the original and the default. |
 | `GROQ_MAX_TOKENS=1000` | Completion cap. 1000 is the known-safe value. |
@@ -85,6 +85,43 @@ Either Groq or Claude (Anthropic, `claude-haiku-5-5`) can be the primary provide
 **Cost** (an estimate to confirm from real `usage`): about 1,500 input + 100 output tokens per call, about $0.0002 at $0.10 / $0.50 per million tokens. As the fallback it is paid only when the primary fails; as the primary, on every AI-handled message.
 
 **Rollback:** set `NLU_DRIVER=groq` and `NLU_FALLBACK=none` (or remove `ANTHROPIC_API_KEY`), then `php artisan config:clear`. To stop all AI: `NLU_DRIVER=none`.
+
+## Services step (after the appointment type)
+
+After the patient chooses an appointment type the assistant shows that type's services as a tick list, as the admin panel's new-appointment popup does, and the booking carries what they ticked.
+
+- **Where the list comes from:** `POST /api/v3/ai-assistant/get-appointment-type-services` (`Api/v3/AiAssistantServicesController`, logic in `AppointmentTypeServices`). Setting: `PUREMED_AI_SERVICES_ENDPOINT`. Same bearer-token check as the assistant's other calls. **Read only**: nothing is recorded or deactivated when the list is shown (unlike `get-patient-selected-examinations`, which writes "displayed" rows and needs an existing appointment).
+- **Same list as the admin popup:** existing patient = the admin `getServices` rules; a patient created in this conversation = `getServices` with no patient plus `getExtraServices` (age-based services from the birth date). `tests/ai-assistant/services_endpoint_test.php` compares the endpoint with the admin functions for every appointment type and patient in the test tenant, so the two cannot drift apart unnoticed. Names only are returned (no description, url or document), with `checked` (starts ticked) and `locked` (the service named like the type; cannot be removed).
+- **The step:** a tick list with Continue. Typed or spoken: "continue", "all", "none", a service name to add it, "remove/without <name>" to remove it. **No AI provider is ever asked on this step**, so service names never leave the server. A "yes" here moves to the dates; it is not consent to book.
+- **Booking:** `book-newtest` receives `exam_ids` (comma separated) built only from ids PureMed offered for the type being booked. PureMed's booking code then deactivates those services' reminders (`_deactivateReminderNew`) exactly as it does for the admin popup and the app. With nothing offered or ticked, no `exam_ids` is sent and PureMed adds the type's own services as before. The confirmation card lists the chosen services.
+- **If it fails:** no services, or a failed call, goes straight to the dates with no error shown.
+- **Rollback:** `AI_ASSISTANT_SERVICES_STEP=false` (then `php artisan config:clear`) restores the previous flow: no step, no `exam_ids`.
+- **Not yet checked:** whether cancelling a booking made with services reactivates their reminders (`cancel-new` and `_activateReminderOnEdit`). That is existing PureMed behaviour and is not changed here.
+- **German:** the new wording (in `Translator`) is a first draft for the same native-speaker review as the rest.
+
+## Country code for new patients
+
+Every number used to be saved and texted with the Austrian code `0043`. A patient the practice does **not** know is now asked which country their mobile number is from, after the date of birth and before the email, so the verification SMS and the saved record use the right country code. A returning patient is never asked: their code goes to the country code on their record.
+
+- **The list:** the practice's own active `country_codes` (the same list the admin popup offers: +43, +49, +39, +33, +31, +48, +41 at the time of writing), named in the patient's language, plus "Other country". Endpoint: `POST /api/v3/ai-assistant/get-country-codes` (read only; app key header, because a new patient has no token yet). Setting: `PUREMED_AI_COUNTRY_CODES_ENDPOINT`.
+- **Answering:** tap a chip, or say or type a country's name in either language ("Deutschland", "Germany"), its code ("+49", "0049", "49"), or "other" and then a code of their own: `+` or `00` followed by one to four digits, nothing else (e.g. `+91`). No AI is asked on this step.
+- **What is used:** the chosen code is the one the verification SMS (and any resend) is texted with and the one registration saves. The register API only accepts Austria, Germany and Switzerland as `country`, so `+49` is saved as Germany, `+41` as Switzerland and every other code as Austria.
+- **If it cannot be asked:** with the list unavailable, empty or unreadable, nothing is asked and `PUREMED_DEFAULT_COUNTRY_CODE` (`0043`) and `PUREMED_DEFAULT_COUNTRY` apply, exactly as before.
+- **Rollback:** `AI_ASSISTANT_ASK_COUNTRY=false` (then `php artisan config:clear`).
+- **Tests:** `country_step_test.php`. The suites about other things (`otp`, `otp_returning`, `gender`, `combined_flow`) switch the question off in their own setup so they keep testing what they were written for.
+
+## Speed: selection shortcuts and the timing log
+
+**Selection shortcuts** (`AI_ASSISTANT_SELECTION_SHORTCUTS`, default on). On the four choosing steps (doctor, appointment type, day, time) an answer that is exactly one option's label ("Dr Anna Patel", "13.08.2026", "06:10") or a bare ordinal ("the second one", "die zweite", "den zweiten Arzt") is read by the rules without asking an AI, saving the AI's 2 to 5 seconds and part of the shared token budget. It is narrow on purpose:
+- only when the step's list is really in the conversation and the patient is signed in;
+- the ordinal must point inside the options on screen (not behind "Show more"); "the last one", "number 2", bare digits, questions and anything with extra words ("the second one tomorrow", "not the second", "maybe the second") go to the AI as before;
+- the rules, run on the option's own label, must pick the very same option (so two options with the same label, or a label that is part of another, are left to the AI);
+- it only decides that the AI need not be asked: the rules then run in full, so consent, OTP, booking and cancellation checks are all still made. If the rules do not move the conversation on, the turn simply continues on the AI path.
+`AI_ASSISTANT_SELECTION_SHORTCUTS=false` is the rollback.
+
+**Timing log** (`AI_ASSISTANT_TIMING_LOG`, default on). One line per turn, `AI assistant timing: turn`, with: `step_before`, `step_after`, `lang`, `shortcut` (`selection`, `rule` or null), `total_ms`, `ai_calls`, `ai_providers`, `ai_ms`, `ai_outcome`, `puremed_ms`, `puremed_calls` (per operation: `n`, `ms`, `failed`), `db_queries`, `db_ms` (this application's own database only; PureMed's database time is inside its call). Durations, counts and operation names only - never a message, name, number, date, appointment, token, key or response body. Provider calls also have their own line, `AI assistant NLU: provider call` (latency, tokens, outcome).
+
+Reading it: `grep "timing: turn" storage/logs/laravel-*.log`. If `ai_ms` is most of `total_ms`, the AI is the cost (try shortcuts, a lower reasoning effort, or the other provider); if `puremed_ms` is, look at the slow operation in `puremed_calls`; if `db_ms` or `total_ms - ai_ms - puremed_ms - db_ms` is large, it is this application. Compare turns with `shortcut` set against those without to see what the shortcuts save.
 
 ## German wording
 

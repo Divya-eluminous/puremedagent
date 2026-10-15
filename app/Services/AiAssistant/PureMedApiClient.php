@@ -28,9 +28,30 @@ class PureMedApiClient
         ]);
     }
 
+    /**
+     * The practice's active country codes: [{iso, name_en, name_de, code}].
+     * Read only. A new patient has no token yet, so this uses the app key, as
+     * registration does.
+     */
+    public function getCountryCodes(): array
+    {
+        return $this->post('ai_country_codes_endpoint', [], [
+            'APP-TOKEN' => config('constants.APP_TOKEN'),
+        ]);
+    }
+
     public function getDoctors(string $token, array $payload = []): array
     {
         return $this->post('doctors_endpoint', $payload, $this->bearer($token));
+    }
+
+    /**
+     * The services offered for an appointment type: [{id, name, checked, locked}].
+     * Read only; the ids are what the booking call takes as exam_ids.
+     */
+    public function getAppointmentTypeServices(string $token, array $payload): array
+    {
+        return $this->post('ai_services_endpoint', $payload, $this->bearer($token));
     }
 
     public function getAppointmentTypes(string $token, array $payload = []): array
@@ -113,6 +134,8 @@ class PureMedApiClient
     private function post(string $endpointKey, array $payload, array $headers): array
     {
         $url = $this->url((string) config('ai-assistant.' . $endpointKey));
+        $timer = TurnTimer::current();
+        $clock = $timer->now();
 
         try {
             $response = Http::withHeaders($headers)
@@ -120,6 +143,8 @@ class PureMedApiClient
                 ->asForm()
                 ->post($url, $payload);
         } catch (Throwable $exception) {
+            $timer->puremedCall($endpointKey, $clock, true);
+
             Log::error('AI assistant: PureMed API request failed', [
                 'endpoint' => $endpointKey,
                 'url' => $url,
@@ -130,6 +155,9 @@ class PureMedApiClient
         }
 
         $body = $response->json();
+
+        // How long it took and whether it worked - never what it said.
+        $timer->puremedCall($endpointKey, $clock, !is_array($body) || !(bool) data_get($body, 'status', false));
 
         if (!is_array($body)) {
             Log::error('AI assistant: PureMed API returned a non-JSON body', [

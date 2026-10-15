@@ -211,6 +211,16 @@ class Translator
         'Male' => 'Männlich',
         'Female' => 'Weiblich',
         'Different doctor' => 'Andere Ärztin / anderer Arzt',
+        'Continue' => 'Weiter',
+        "No problem - let's use a different number." => 'Kein Problem – nehmen wir eine andere Nummer.',
+        'Which country is your mobile number from?' => 'Aus welchem Land ist Ihre Handynummer?',
+        'Other country' => 'Anderes Land',
+        'Please type your country code, for example +91 or 0091.' => 'Bitte geben Sie Ihre Landesvorwahl ein, zum Beispiel +91 oder 0091.',
+        "I didn't catch the country. Please choose one from the list, or say \"other\"." => 'Das Land habe ich nicht verstanden. Bitte wählen Sie eines aus der Liste oder sagen Sie „anderes“.',
+        "That doesn't look like a country code. It starts with + or 00, for example +91 or 0091." => 'Das sieht nicht wie eine Landesvorwahl aus. Sie beginnt mit + oder 00, zum Beispiel +91 oder 0091.',
+        'Which services would you like to include? Tick the ones you want, then press Continue.' => 'Welche Leistungen möchten Sie dazu? Wählen Sie die gewünschten aus und drücken Sie auf „Weiter“.',
+        'Please tick the services you would like and press Continue, or say "all", "none" or "continue".' => 'Bitte wählen Sie die gewünschten Leistungen aus und drücken Sie auf „Weiter“, oder sagen Sie „alle“, „keine“ oder „weiter“.',
+        'Loading the services...' => 'Leistungen werden geladen...',
         'Yes, book it' => 'Ja, buchen',
         'Pick another time' => 'Andere Zeit wählen',
         'Keep them all' => 'Alle behalten',
@@ -262,6 +272,7 @@ class Translator
         'date' => 'Datum',
         'time' => 'Uhrzeit',
         'when' => 'Zeitpunkt',
+        'services' => 'Leistungen',
     ];
 
     /**
@@ -330,6 +341,12 @@ class Translator
                 => fn ($m) => 'Derzeit habe ich nur ' . ($m[1] === 'no doctors' ? 'keine Ärzte' : str_replace(' and ', ' und ', $m[1])) . ' verfügbar. Möchten Sie einen davon wählen?',
             '/^(.+) is not available for booking any more\. Which doctor would you like to see\?$/su'
                 => fn ($m) => "{$m[1]} ist nicht mehr buchbar. Welche Ärztin oder welchen Arzt möchten Sie sehen?",
+            '/^Got it, country code (.+)\.$/su'
+                => fn ($m) => "Verstanden, Landesvorwahl {$m[1]}.",
+            '/^Ticked: (.+)\. Press Continue when you are happy, or tick more\.$/su'
+                => fn ($m) => "Ausgewählt: {$m[1]}. Drücken Sie auf „Weiter“, wenn alles passt, oder wählen Sie weitere aus.",
+            '/^Unticked: (.+)\. Press Continue when you are happy, or tick more\.$/su'
+                => fn ($m) => "Abgewählt: {$m[1]}. Drücken Sie auf „Weiter“, wenn alles passt, oder wählen Sie weitere aus.",
             '/^(.+) is not offered any more\. What do you need the appointment for\?$/su'
                 => fn ($m) => "{$m[1]} wird nicht mehr angeboten. Wofür benötigen Sie den Termin?",
             '/^(.+) on (.+) has been taken since\. Here is what I still have that day - which one suits\?$/su'

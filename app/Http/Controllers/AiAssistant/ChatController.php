@@ -4,6 +4,7 @@ namespace App\Http\Controllers\AiAssistant;
 
 use App\Http\Controllers\Controller;
 use App\Services\AiAssistant\ConsentRules;
+use App\Services\AiAssistant\TurnTimer;
 use App\Services\AiAssistant\NluManager;
 use App\Services\AiAssistant\PatientAuthenticator;
 use App\Services\AiAssistant\OtpService;
@@ -47,7 +48,19 @@ class ChatController extends Controller
      *    that it was verified. Older conversations hold an identity with no such
      *    proof and are dropped rather than trusted.
      */
-    private const FLOW_VERSION = 5;
+    private const FLOW_VERSION = 7;
+
+    /** Asked when "Other" is chosen on the country question. */
+    private const COUNTRY_OTHER_PROMPT = 'Please type your country code, for example +91 or 0091.';
+
+    /** Said when the country question could not read the answer. */
+    private const COUNTRY_REASK = "I didn't catch the country. Please choose one from the list, or say \"other\".";
+
+    /** Said when a typed country code is not one. */
+    private const COUNTRY_CODE_REASK = "That doesn't look like a country code. It starts with + or 00, for example +91 or 0091.";
+
+    /** Said when the services step could not read the answer. */
+    private const SERVICES_REASK = 'Please tick the services you would like and press Continue, or say "all", "none" or "continue".';
 
     /**
      * Where the one-turn undo snapshot lives.
@@ -193,6 +206,14 @@ class ChatController extends Controller
 
         $this->rememberLanguage($request);
 
+        $timer = TurnTimer::current();
+        $timing = (bool) config('ai-assistant.timing_log', true);
+        $shortcut = null;
+
+        if ($timing) {
+            $timer->begin();
+        }
+
         $state = $this->state();
         $replies = [];
         $stepBefore = $state['step'];
@@ -212,10 +233,28 @@ class ChatController extends Controller
             $choiceValue = '';
         }
 
+        // The same for the services tick list: its submission means something
+        // only on the services step, and nothing else is read as ticks there.
+        foreach (['services', 'country'] as $chipStep) {
+            if ($choiceValue !== '' && (($state['step'] === $chipStep) !== ($choiceType === $chipStep))) {
+                $choiceValue = '';
+            }
+        }
+
         if ($starting) {
             // Open on intent, not on a field - the patient says what they want
             // before the assistant asks for anything.
             if ($state['step'] === 'intent' && empty($state['patient'])) {
+                $replies[] = $this->say("Hi, I'm your PureMed Assistant.");
+            } elseif ($state['step'] === 'otp_failed') {
+                // A dead end - the code could not be sent, or the limit was hit -
+                // with nothing in it to resume: nobody was verified and nothing
+                // was created. Resuming it only showed "please call the practice"
+                // again, for the rest of the session, even once the wait was over.
+                // Start clean instead. The limits are kept per mobile number on
+                // the server, so this gets round none of them: the same number is
+                // refused again, with the time left.
+                $state = $this->freshState();
                 $replies[] = $this->say("Hi, I'm your PureMed Assistant.");
             } elseif ($state['step'] === 'closed') {
                 // The last conversation was closed politely, so there is
@@ -266,8 +305,29 @@ class ChatController extends Controller
             $replies = null;
             $rulesOwned = false;
 
-            if ($aiFirst) {
+            // An answer that names one option exactly needs no AI: the rules are
+            // given that option's own label, as they are when the AI has picked
+            // it. If that does not move the conversation on, nothing is lost -
+            // the turn starts again on the ordinary path below.
+            if ($aiEligible && ($direct = $this->selectionShortcut($stepBefore, $text, $stateBefore, $language)) !== null) {
+                $replies = $this->replayInterpretation([$direct], $stateBefore, $state, $source, $client, $authenticator, $otp);
+
+                if ($state['step'] === $stepBefore && empty($state['_handled']) && empty($state['_no_prompt'])) {
+                    $state = $stateBefore;
+                    $replies = null;
+                } else {
+                    $shortcut = 'selection';
+                    $ruleOwned = true;
+                }
+            }
+
+            if ($ruleOwned && $shortcut === null) {
+                $shortcut = 'rule';
+            }
+
+            if ($aiFirst && $replies === null) {
                 $aiTried = true;
+                $clock = $timer->now();
                 $nlu = $grok->interpret(
                     $stepBefore,
                     $this->nluOptions($stateBefore),
@@ -278,6 +338,7 @@ class ChatController extends Controller
                     $this->nluContext($stateBefore),
                     $language
                 );
+                $timer->ai($clock, $grok->attempts(), $grok->outcome());
 
                 $retries = $nlu ? $this->nluInput($stepBefore, $nlu) : [];
 
@@ -330,6 +391,7 @@ class ChatController extends Controller
                     && $aiEligible) {
                     $aiTried = true;
 
+                    $clock = $timer->now();
                     $nlu = $grok->interpret(
                         $stepBefore,
                         $this->nluOptions($stateBefore),
@@ -338,6 +400,7 @@ class ChatController extends Controller
                         $this->nluContext($stateBefore),
                         $language
                     );
+                    $timer->ai($clock, $grok->attempts(), $grok->outcome());
                     $retries = $nlu ? $this->nluInput($stepBefore, $nlu) : [];
 
                     if ($retries) {
@@ -387,6 +450,8 @@ class ChatController extends Controller
             $state['chip_page'] = 0;
         }
 
+        $this->syncServices($state);
+
         $prompt = $this->promptFor($state);
 
         // On a free-text step the re-ask message already contains the question,
@@ -430,6 +495,12 @@ class ChatController extends Controller
             $this->rememberForEdit($starting, $text, $choiceValue, $source, $stateBefore ?? null, $state);
         }
 
+        // Where the time went: durations, counts and operation names only.
+        if ($timing) {
+            Log::info('AI assistant timing: turn', $timer->summary($stepBefore, (string) $state['step'], $this->language(), $shortcut));
+            $timer->end();
+        }
+
         return response()->json($this->localize([
             'messages' => $replies,
             // Whether the browser may offer "edit" on the message just sent.
@@ -443,7 +514,7 @@ class ChatController extends Controller
             // Set only when the conversation has ended: the page clears itself
             // and returns to the start screen after this many seconds.
             'ended' => $ended,
-            'reset_after' => $ended ? max(5, (int) config('ai-assistant.end_reset_seconds', 60)) : null,
+            'reset_after' => $ended ? max(5, (int) config('ai-assistant.end_reset_seconds', 15)) : null,
             // What the browser should narrate WHILE the next answer is being
             // processed. Sent ahead of time because the API calls happen before
             // the next response exists - otherwise the status would appear
@@ -466,6 +537,147 @@ class ChatController extends Controller
     }
 
     /**
+     * The label to give the rules when the patient's whole answer names exactly
+     * one option on screen - or null, and the AI is asked as before.
+     *
+     * Only the four choosing steps; only when that step's list is really in the
+     * conversation; only an exact label or a bare ordinal word inside the options
+     * shown ("the second one", "die zweite") with nothing else in the sentence;
+     * and only when the existing matcher, run on that label, picks the very same
+     * option. Anything doubtful - a part of a name, "the other one", "not the
+     * second", a day name, a number, a question - returns null.
+     *
+     * It decides only that the AI need not be asked. The rules then run in full,
+     * so every check they make is still made.
+     */
+    private function selectionShortcut(string $step, string $text, array $state, string $language): ?string
+    {
+        if (!config('ai-assistant.selection_shortcuts', true)) {
+            return null;
+        }
+
+        // A conversation that is not signed in as a patient has no business on
+        // these steps; leave it to the ordinary checks.
+        if (empty($state['patient_id']) || empty($state['token'])) {
+            return null;
+        }
+
+        $spoken = $this->normalizeText($text);
+
+        if ($spoken === '' || mb_strlen($text) > 60 || str_contains($text, '?') || count(explode(' ', $spoken)) > 8) {
+            return null;
+        }
+
+        $date = null;
+
+        switch ($step) {
+            case 'doctor':
+                $items = $state['doctors'] ?? [];
+                $cards = $items ? $this->doctorCards($items) : [];
+                break;
+
+            case 'appointment_type':
+                $items = $state['appointment_types'] ?? [];
+                $cards = ($items && !empty($state['doctor'])) ? $this->typeCards($items) : [];
+                break;
+
+            case 'slot_date':
+                $items = $state['slots'] ?? [];
+                $cards = ($items && !empty($state['appointment_type'])) ? $this->dateCards($items) : [];
+                break;
+
+            case 'slot_time':
+                $items = $state['slots'] ?? [];
+                $date = $state['slot_date'] ?? null;
+                $cards = ($items && $date && !empty($state['appointment_type'])) ? $this->timeCards($items, $date, $state['slot_window'] ?? null) : [];
+                break;
+
+            default:
+                return null;
+        }
+
+        if (!$cards) {
+            return null;
+        }
+
+        // Positions count from the first card; dates arrive keyed by date.
+        $cards = array_values($cards);
+
+        if ($step === 'doctor') {
+            $items = array_values($items);
+        }
+
+        // What is on screen: the first page of chips, then "Show more".
+        $visible = max(3, (int) config('ai-assistant.chips_per_page', 6)) * (1 + (int) ($state['chip_page'] ?? 0));
+
+        $index = null;
+        $position = $this->bareOrdinal($spoken, $language);
+
+        if ($position !== null) {
+            if ($position > min($visible, count($cards))) {
+                return null;
+            }
+
+            $index = $position - 1;
+        } else {
+            $hits = [];
+
+            foreach ($cards as $i => $card) {
+                $names = [$this->normalizeText((string) $card['title'])];
+
+                if ($step === 'doctor') {
+                    $names[] = $this->normalizeText($this->doctorName($items[$i]));
+                }
+
+                if (in_array($spoken, $names, true)) {
+                    $hits[] = $i;
+                }
+            }
+
+            if (count($hits) !== 1) {
+                return null;
+            }
+
+            $index = $hits[0];
+        }
+
+        $label = (string) $cards[$index]['title'];
+
+        // The rules, on that label, must land on the same option.
+        $agrees = match ($step) {
+            'doctor', 'appointment_type' => ($m = $this->matchOption($items, '', $label)) && (string) $m['id'] === (string) $cards[$index]['value'],
+            'slot_date' => $this->matchSlotDate($items, '', $label) === $cards[$index]['value'],
+            'slot_time' => ($m = $this->matchSlot($items, $date, '', $label, $state['slot_window'] ?? null)) && ($m['time'] ?? null) === $cards[$index]['value'],
+        };
+
+        return $agrees ? $label : null;
+    }
+
+    /**
+     * The position a patient names when the ordinal is their WHOLE answer:
+     * "second", "the second one please", "I will take the third", and in German
+     * "die zweite", "den zweiten Arzt", "ich nehme die dritte". Null for anything
+     * with more in it - or less: "the last one", "number 2" and bare digits are
+     * not trusted here.
+     */
+    private function bareOrdinal(string $spoken, string $language): ?int
+    {
+        if ($language === 'de') {
+            $pattern = '/^(?:(?:ich nehme|ich nehm|ich möchte|ich moechte|ich hätte gern|ich haette gern|nehmen wir|dann) )?(?:(?:die|der|das|den|dem) )?'
+                . '(erst|zweit|dritt|viert|fünft|fuenft|sechst|siebt|siebent|acht|neunt|zehnt)(?:e|er|en|es|em)'
+                . '(?: (?:option|arzt|ärztin|aerztin|termin|uhrzeit|zeit|tag|datum))?(?: bitte)?$/u';
+            $words = ['erst' => 1, 'zweit' => 2, 'dritt' => 3, 'viert' => 4, 'fünft' => 5, 'fuenft' => 5, 'sechst' => 6, 'siebt' => 7, 'siebent' => 7, 'acht' => 8, 'neunt' => 9, 'zehnt' => 10];
+        } else {
+            $pattern = '/^(?:(?:i (?:will|ll|d|would) (?:take|like|have|go with)|let s go with|go with|i take|take) )?(?:the )?'
+                . '(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)'
+                . '(?: (?:one|option|doctor|appointment|slot|time|day|date))?(?: please)?$/u';
+            $words = ['first' => 1, 'second' => 2, 'third' => 3, 'fourth' => 4, 'fifth' => 5, 'sixth' => 6, 'seventh' => 7, 'eighth' => 8, 'ninth' => 9, 'tenth' => 10];
+        }
+
+        return preg_match($pattern, $spoken, $m) ? ($words[$m[1]] ?? null) : null;
+    }
+
+    /**
      * Is this message one a deterministic rule owns outright?
      *
      * For these the rules are exact and a model can only be a worse answer, a
@@ -473,9 +685,11 @@ class ChatController extends Controller
      * pure function of the text and the state: nothing is changed, nothing is
      * sent anywhere.
      *
-     * Deliberately NOT here: picking a doctor, a day or a time, "another
-     * doctor", "show me the times". Those are the natural language the AI is
-     * for; the rules remain the fallback if it cannot read them.
+     * Deliberately NOT here: picking a doctor, a day or a time in a sentence,
+     * "another doctor", "show me the times". Those are the natural language the
+     * AI is for; the rules remain the fallback if it cannot read them. The one
+     * exception - an answer that IS an option's exact label or a bare ordinal -
+     * is selectionShortcut(), which checks that the rules agree first.
      */
     private function deterministicShortcut(string $step, string $text, array $state): bool
     {
@@ -659,6 +873,10 @@ class ChatController extends Controller
         }
 
         if (!empty($payload['options']) && is_array($payload['options'])) {
+            if (isset($payload['options']['continue']) && is_string($payload['options']['continue'])) {
+                $payload['options']['continue'] = $t->translate($payload['options']['continue'], $lang);
+            }
+
             foreach ($payload['options']['items'] ?? [] as $i => $item) {
                 foreach (['title', 'subtitle'] as $field) {
                     if (isset($item[$field]) && is_string($item[$field])) {
@@ -848,6 +1066,18 @@ class ChatController extends Controller
 
         if ($text === '' && $choiceValue === '') {
             return [];
+        }
+
+        // "I typed the wrong number" before anyone is registered or verified:
+        // nothing exists that the number could be tied to, so it can simply be
+        // asked for again. (After registration there is no update call; the
+        // ordinary "I can't change that" answer stands.)
+        if ($choiceValue === ''
+            && empty($state['patient_id'])
+            && !empty($state['patient']['mobile_no'])
+            && in_array($state['step'], ['country', 'email', 'email_confirm', 'otp_verify', 'first_name', 'last_name', 'gender'], true)
+            && $this->wantsToChangePhone($text)) {
+            return $this->restartWithNewNumber($state);
         }
 
         // "Are there more doctors?" is a question about who the practice has,
@@ -1252,7 +1482,11 @@ class ChatController extends Controller
                 // until it is. The code is checked against the practice's own
                 // patients_otp table, and the attempts are counted against the
                 // mobile number across every session (OtpGuard), not in here.
-                $entered = preg_replace('/\D+/', '', $choiceValue !== '' ? $choiceValue : $text);
+                // The four digits and nothing else (spaces, punctuation and a few
+                // harmless words around them are fine). A stray letter - "7134s" -
+                // is a slip or a mishearing, not a code, and is asked for again
+                // without being compared, so it costs no attempt.
+                $entered = $this->readCode($choiceValue !== '' ? $choiceValue : $text) ?? '';
 
                 if (!$otp) {
                     // No way to check a code means no way in. Never a way round.
@@ -1362,7 +1596,13 @@ class ChatController extends Controller
                     $state['slot_hint'] = $hint;
                 }
 
-                return $this->loadSlots($state, $client);
+                return $this->offerServices($state, $client);
+
+            case 'services':
+                return $this->answerServices($text, $choiceValue, $state, $client);
+
+            case 'country':
+                return $this->answerCountry($text, $choiceValue, $state);
 
             case 'slot_date':
                 // "I don't want 13 August" names the day it is refusing.
@@ -1907,6 +2147,24 @@ class ChatController extends Controller
                     'input' => $this->input(),
                 ];
 
+            case 'country':
+                if (!empty($state['country_free'])) {
+                    return ['text' => self::COUNTRY_OTHER_PROMPT, 'input' => $this->input()];
+                }
+
+                return [
+                    'text' => 'Which country is your mobile number from?',
+                    'options' => $this->countryOptions($state),
+                    'input' => $this->input(),
+                ];
+
+            case 'services':
+                return [
+                    'text' => 'Which services would you like to include? Tick the ones you want, then press Continue.',
+                    'options' => $this->serviceOptions($state),
+                    'input' => $this->input(),
+                ];
+
             case 'slot_date':
                 return [
                     'text' => 'Which day works best for you?',
@@ -2081,14 +2339,15 @@ class ChatController extends Controller
             'email' => $patient['email'],
             'gender' => $patient['gender'],
             'age' => $birthDate->age,
-            'country_code' => config('ai-assistant.default_country_code'),
+            'country_code' => $this->chosenCountryCode($patient),
             'postal_code' => config('ai-assistant.default_postal_code'),
-            'country' => config('ai-assistant.default_country'),
+            'country' => $this->chosenCountry($patient),
             'password' => Str::random(12),
             'login_type' => config('ai-assistant.login_type'),
         ];
 
         $registration = $client->registerPatient($payload);
+        $state['new_patient'] = (bool) ($registration['ok'] ?? false);
 
         // Registration may report the patient already exists; either way we look
         // the record up so a returning patient can keep going.
@@ -2310,14 +2569,22 @@ class ChatController extends Controller
 
         $slot = $state['slot'];
 
-        $result = $client->bookAppointment($state['token'], [
+        $booking = [
             'patient_id' => $state['patient_id'],
             'doctor_id' => $state['doctor']['id'],
             'appointment_type_id' => $state['appointment_type']['id'],
             'appointment_date' => $slot['slot_date'],   // already d.m.Y
             'time_frame' => $slot['time'],
             'time_slot_id' => $slot['time_slot_id'],
-        ]);
+        ];
+
+        // Only ids PureMed offered for THIS appointment type. PureMed adds the
+        // type's own services itself, so nothing ticked means nothing is sent.
+        if ($ticked = $this->chosenServiceIds($state)) {
+            $booking['exam_ids'] = implode(',', $ticked);
+        }
+
+        $result = $client->bookAppointment($state['token'], $booking);
 
         if (!$result['ok']) {
             // PureMed rejects double bookings itself - surface its reason and
@@ -3183,9 +3450,469 @@ class ChatController extends Controller
             'Patient' => trim(($state['patient']['first_name'] ?? '') . ' ' . ($state['patient']['last_name'] ?? '')),
             'Doctor' => $this->doctorDisplay($state['doctor']),
             'Appointment' => $state['appointment_type']['name'] ?? '',
+        ] + ($this->chosenServiceNames($state) !== '' ? ['Services' => $this->chosenServiceNames($state)] : []) + [
             'Date' => $state['slot']['slot_date'] ?? '',
             'Time' => $state['slot']['time'] ?? '',
         ];
+    }
+
+    /* -----------------------------------------------------------------
+    |  Where a new patient's mobile number is from
+    ------------------------------------------------------------------*/
+
+    /**
+     * For a patient the practice does not know: fetch the practice's own
+     * country list and, if there is one, make the next step the question.
+     * Returns false - and changes nothing - when the switch is off or the list
+     * cannot be had; the Austrian default then applies, exactly as before.
+     */
+    private function askCountry(array &$state, PureMedApiClient $client): bool
+    {
+        unset($state['patient']['country_code'], $state['patient']['country']);
+        $state['country_options'] = [];
+        $state['country_free'] = false;
+
+        if (!config('ai-assistant.ask_country', true)) {
+            return false;
+        }
+
+        $result = $client->getCountryCodes();
+        $options = $result['ok'] ? $this->cleanCountries($result['data']) : [];
+
+        if (!$options) {
+            return false;
+        }
+
+        $state['country_options'] = $options;
+        $state['step'] = 'country';
+
+        return true;
+    }
+
+    /**
+     * What PureMed sent, reduced to iso, names and a code that looks like one.
+     * Anything else is dropped.
+     *
+     * @return array<int, array{iso: string, name_en: string, name_de: string, code: string}>
+     */
+    private function cleanCountries(mixed $data): array
+    {
+        $out = [];
+
+        foreach ((array) $data as $row) {
+            if (!is_array($row)
+                || !is_string($row['code'] ?? null) || !preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $row['code'])
+                || !is_string($row['name_en'] ?? null) || trim($row['name_en']) === '') {
+                continue;
+            }
+
+            $out[$row['code']] = [
+                'iso' => mb_substr((string) ($row['iso'] ?? ''), 0, 3),
+                'name_en' => mb_substr(trim($row['name_en']), 0, 60),
+                'name_de' => mb_substr(trim((string) ($row['name_de'] ?? '')) ?: trim($row['name_en']), 0, 60),
+                'code' => $row['code'],
+            ];
+        }
+
+        return array_slice(array_values($out), 0, 20);
+    }
+
+    /** The country chips, named in the patient's language, then "Other". */
+    private function countryOptions(array $state): array
+    {
+        $german = $this->language() === 'de';
+
+        $items = array_map(fn ($c) => [
+            'value' => $c['code'],
+            'title' => ($german ? $c['name_de'] : $c['name_en']) . ' (' . $c['code'] . ')',
+        ], $state['country_options'] ?? []);
+
+        $items[] = ['value' => '__other__', 'title' => 'Other country'];
+
+        return $this->options('country', $items);
+    }
+
+    /**
+     * The patient's answer: a chip, a country's name in either language, its
+     * code, or "other" and then a code of their own. Never the AI, and nothing
+     * that is not a code PureMed listed - or, for "other", + or 00 followed by
+     * one to four digits, which is the register API's own pattern.
+     */
+    private function answerCountry(string $text, string $choiceValue, array &$state): array
+    {
+        $options = $state['country_options'] ?? [];
+
+        // Not a place a conversation without a number can be.
+        if (empty($state['patient']['mobile_no']) || empty($state['patient']['birth_date'])) {
+            $state['step'] = 'mobile_no';
+            $state['country_free'] = false;
+
+            return [];
+        }
+
+        if (!$options) {
+            // A session that lost its list: carry on with the default.
+            $state['step'] = $this->nextRegistrationStep('birth_date');
+
+            return [];
+        }
+
+        if ($choiceValue !== '') {
+            if ($choiceValue === '__other__') {
+                $state['country_free'] = true;
+
+                return [];
+            }
+
+            foreach ($options as $option) {
+                if ($option['code'] === $choiceValue) {
+                    return $this->acceptCountry($state, $option['code']);
+                }
+            }
+
+            $state['_handled'] = true;
+
+            return [$this->say(self::COUNTRY_REASK)];
+        }
+
+        if (str_contains($text, '?') || mb_strlen($text) > 60) {
+            $state['_handled'] = true;
+
+            return [$this->say(!empty($state['country_free']) ? self::COUNTRY_CODE_REASK : self::COUNTRY_REASK)];
+        }
+
+        $filler = ['please', 'bitte', 'it', 'is', 'its', 'my', 'the', 'number', 'from', 'ist', 'aus', 'ja', 'yes', 'ok', 'okay', 'country', 'land', 'code', 'vorwahl', 'nummer', 'thanks', 'danke'];
+        $tokens = array_values(array_filter(
+            preg_split('/\s+/u', mb_strtolower(trim(str_replace(["'", '’'], '', $text))), -1, PREG_SPLIT_NO_EMPTY) ?: [],
+            fn ($t) => !in_array(trim($t, '.,!;:'), $filler, true)
+        ));
+        $tokens = array_map(fn ($t) => trim($t, '.,!;:'), $tokens);
+
+        if (!empty($state['country_free'])) {
+            if (count($tokens) === 1 && preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $tokens[0])) {
+                return $this->acceptCountry($state, $tokens[0]);
+            }
+
+            $state['_handled'] = true;
+
+            return [$this->say(self::COUNTRY_CODE_REASK)];
+        }
+
+        $spoken = implode(' ', $tokens);
+
+        if (in_array($spoken, ['other', 'another', 'other country', 'another country', 'weitere', 'weiteres', 'andere', 'anderes', 'anderes land', 'anderes', 'else'], true)) {
+            $state['country_free'] = true;
+
+            return [];
+        }
+
+        // A name in either language, or the code itself (+49, 0049, 49).
+        $hits = [];
+        $plain = fn ($v) => str_replace(['ä', 'ö', 'ü', 'ß'], ['ae', 'oe', 'ue', 'ss'], mb_strtolower($v));
+
+        foreach ($options as $option) {
+            $names = [$plain($option['name_en']), $plain($option['name_de']), mb_strtolower($option['name_en']), mb_strtolower($option['name_de'])];
+            $digits = ltrim(preg_replace('/^00/', '', ltrim($option['code'], '+')), '+');
+
+            if (in_array($spoken, $names, true) || in_array($plain($spoken), $names, true)
+                || preg_match('/^(\+|00)?' . preg_quote($digits, '/') . '$/', $spoken)) {
+                $hits[$option['code']] = $option['code'];
+            }
+        }
+
+        if (count($hits) === 1) {
+            return $this->acceptCountry($state, reset($hits));
+        }
+
+        // A code of their own, typed with its + or 00, that the list does not hold.
+        if (!$hits && count($tokens) === 1 && preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $tokens[0])) {
+            return $this->acceptCountry($state, $tokens[0]);
+        }
+
+        $state['_handled'] = true;
+
+        return [$this->say(self::COUNTRY_REASK)];
+    }
+
+    /** Remember the code and the country the register API will accept for it, and move on. */
+    private function acceptCountry(array &$state, string $code): array
+    {
+        $state['patient']['country_code'] = $code;
+        $state['patient']['country'] = $this->countryNameFor($code);
+        $state['country_free'] = false;
+        $state['step'] = $this->nextRegistrationStep('birth_date');
+
+        return [$this->say('Got it, country code ' . $code . '.')];
+    }
+
+    /** The register API only knows Austria, Germany and Switzerland as countries. */
+    private function countryNameFor(string $code): string
+    {
+        $digits = preg_replace('/^(\+|00)/', '', $code);
+
+        return match ($digits) {
+            '49' => 'Germany',
+            '41' => 'Switzerland',
+            default => 'Austria',
+        };
+    }
+
+    /** The code to register with: the one chosen if it is a real code, otherwise the default. */
+    private function chosenCountryCode(array $patient): string
+    {
+        $code = trim((string) ($patient['country_code'] ?? ''));
+
+        return preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $code) ? $code : (string) config('ai-assistant.default_country_code');
+    }
+
+    /** The country to register with: one the register API accepts, otherwise the default. */
+    private function chosenCountry(array $patient): string
+    {
+        $country = (string) ($patient['country'] ?? '');
+
+        return in_array($country, ['Austria', 'Germany', 'Switzerland'], true) ? $country : (string) config('ai-assistant.default_country');
+    }
+
+    /* -----------------------------------------------------------------
+    |  Services for the chosen appointment type
+    ------------------------------------------------------------------*/
+
+    /**
+     * After the type is chosen: ask PureMed which services go with it and, if
+     * there are any, let the patient tick them before the dates. No services,
+     * or a failed call, leaves the flow exactly as it was: straight to the dates.
+     */
+    private function offerServices(array &$state, PureMedApiClient $client): array
+    {
+        $typeId = (int) ($state['appointment_type']['id'] ?? 0);
+        $state['services'] = [];
+        $state['services_for'] = null;
+        $state['service_ids'] = null;
+
+        $payload = ['appointment_type_id' => $typeId, 'patient_id' => $state['patient_id']];
+
+        // Someone registered in this conversation has no history to read; what
+        // PureMed adds for them comes from their age.
+        if (!empty($state['new_patient']) && !empty($state['patient']['birth_date'])) {
+            $payload['is_new_patient'] = 1;
+            $payload['birth_date'] = Carbon::parse($state['patient']['birth_date'])->format('Y-m-d');
+        }
+
+        // The switch is off: the flow is exactly what it was before this step existed.
+        if (!config('ai-assistant.services_step', true)) {
+            return $this->loadSlots($state, $client);
+        }
+
+        $result = $typeId > 0 ? $client->getAppointmentTypeServices((string) $state['token'], $payload) : ['ok' => false, 'data' => []];
+        $list = $result['ok'] ? $this->cleanServices($result['data']) : [];
+
+        if (!$list) {
+            return $this->loadSlots($state, $client);
+        }
+
+        $state['services'] = $list;
+        $state['services_for'] = $typeId;
+        $state['service_ids'] = array_values(array_map(fn ($s) => $s['id'], array_filter($list, fn ($s) => $s['checked'] || $s['locked'])));
+        $state['step'] = 'services';
+
+        // No "<type> it is." here: loadSlots() says it once the services are settled.
+        return [];
+    }
+
+    /**
+     * What PureMed sent, reduced to id, name and the two flags. Anything that
+     * does not look like a service is dropped.
+     *
+     * @return array<int, array{id: int, name: string, checked: bool, locked: bool}>
+     */
+    private function cleanServices(mixed $data): array
+    {
+        $out = [];
+
+        foreach ((array) $data as $row) {
+            if (!is_array($row) || !isset($row['id']) || !is_numeric($row['id']) || (int) $row['id'] < 1
+                || !is_string($row['name'] ?? null) || trim($row['name']) === '') {
+                continue;
+            }
+
+            $out[(int) $row['id']] = [
+                'id' => (int) $row['id'],
+                'name' => mb_substr(trim($row['name']), 0, 120),
+                'checked' => !empty($row['checked']) || !empty($row['locked']),
+                'locked' => !empty($row['locked']),
+            ];
+        }
+
+        return array_slice(array_values($out), 0, 40);
+    }
+
+    /** The tick list drawn under the question. */
+    private function serviceOptions(array $state): array
+    {
+        $ticked = $state['service_ids'] ?? [];
+
+        return [
+            'type' => 'services',
+            'continue' => 'Continue',
+            'items' => array_map(fn ($s) => [
+                'value' => (string) $s['id'],
+                'title' => $s['name'],
+                'checked' => $s['locked'] || in_array($s['id'], $ticked, true),
+                'locked' => $s['locked'],
+            ], $state['services'] ?? []),
+        ];
+    }
+
+    /**
+     * The patient's answer on the services step: the tick list submitted, or
+     * "continue", "none", "all", or the name of a service to add or remove.
+     * Never the AI, and never anything that is not an id PureMed offered.
+     */
+    private function answerServices(string $text, string $choiceValue, array &$state, PureMedApiClient $client): array
+    {
+        $offered = $state['services'] ?? [];
+
+        if (!$offered || (int) ($state['services_for'] ?? 0) !== (int) ($state['appointment_type']['id'] ?? -1)) {
+            // A session that lost its list: carry on as if there had been none.
+            $state['services'] = [];
+            $state['services_for'] = null;
+            $state['service_ids'] = null;
+
+            return $this->loadSlots($state, $client);
+        }
+
+        $ids = array_map(fn ($s) => $s['id'], $offered);
+        $locked = array_map(fn ($s) => $s['id'], array_filter($offered, fn ($s) => $s['locked']));
+        $current = array_values(array_intersect($state['service_ids'] ?? [], $ids));
+
+        if ($choiceValue !== '') {
+            if (str_starts_with($choiceValue, 'svc:')) {
+                $picked = array_filter(array_map('trim', explode(',', substr($choiceValue, 4))), fn ($v) => preg_match('/^\d{1,9}$/', $v));
+                $picked = array_map('intval', $picked);
+                $keep = array_values(array_unique(array_merge($locked, array_intersect($picked, $ids))));
+                $state['service_ids'] = array_values(array_filter($ids, fn ($id) => in_array($id, $keep, true)));
+
+                return $this->loadSlots($state, $client);
+            }
+
+            $state['_handled'] = true;
+
+            return [$this->say(self::SERVICES_REASK)];
+        }
+
+        $spoken = ' ' . $this->normalizeText($text) . ' ';
+        $named = array_values(array_filter($offered, function ($s) use ($spoken) {
+            $name = $this->normalizeText($s['name']);
+
+            return $name !== '' && str_contains($spoken, ' ' . $name . ' ');
+        }));
+
+        if ($named) {
+            $removing = (bool) preg_match('/ (no|not|without|remove|untick|don|nicht|ohne|entfernen|kein|keine|keinen) /u', $spoken);
+            $names = array_map(fn ($s) => $s['name'], $named);
+
+            foreach ($named as $s) {
+                if ($removing && !$s['locked']) {
+                    $current = array_values(array_diff($current, [$s['id']]));
+                } elseif (!$removing && !in_array($s['id'], $current, true)) {
+                    $current[] = $s['id'];
+                }
+            }
+
+            $state['service_ids'] = $current;
+            $state['_handled'] = true;
+
+            return [$this->say(($removing ? 'Unticked: ' : 'Ticked: ') . implode(', ', $names) . '. Press Continue when you are happy, or tick more.')];
+        }
+
+        $words = trim(preg_replace('/ (please|bitte|thanks|thank you|danke|dankeschon) /u', ' ', $spoken));
+        $words = trim(preg_replace('/\s+/', ' ', $words));
+        $language = $this->language();
+
+        $none = $language === 'de'
+            ? ['keine', 'keins', 'keines', 'nein', 'nein danke', 'ohne', 'uberspringen', 'überspringen', 'nichts']
+            : ['none', 'no', 'no thanks', 'nothing', 'skip', 'without', 'without any', 'no services'];
+        $all = $language === 'de'
+            ? ['alle', 'alles', 'alle bitte', 'alle auswahlen', 'alle auswählen']
+            : ['all', 'all of them', 'everything', 'select all', 'tick all'];
+        $next = $language === 'de'
+            ? ['weiter', 'fertig', 'fortfahren', 'los', 'naechster schritt']
+            : ['continue', 'next', 'proceed', 'done', 'go on', 'carry on', 'that is all', 'that s all'];
+
+        if (in_array($words, $none, true)) {
+            $state['service_ids'] = array_values($locked);
+
+            return $this->loadSlots($state, $client);
+        }
+
+        if (in_array($words, $all, true)) {
+            $state['service_ids'] = array_values($ids);
+
+            return $this->loadSlots($state, $client);
+        }
+
+        if (in_array($words, $next, true) || app(ConsentRules::class)->isClearConsent($text, $language)) {
+            // Whatever is ticked now. Agreeing to carry on is not consent to book.
+            $state['service_ids'] = $current;
+
+            return $this->loadSlots($state, $client);
+        }
+
+        $state['_handled'] = true;
+
+        return [$this->say(self::SERVICES_REASK)];
+    }
+
+    /**
+     * The ids to send as exam_ids: ticked, offered, and offered for the type
+     * being booked - in the order PureMed listed them. Empty when no list was
+     * shown, or it was for another type.
+     *
+     * @return array<int, int>
+     */
+    private function chosenServiceIds(array $state): array
+    {
+        $typeId = (int) ($state['appointment_type']['id'] ?? 0);
+
+        if (empty($state['services']) || $typeId < 1 || (int) ($state['services_for'] ?? 0) !== $typeId) {
+            return [];
+        }
+
+        $offered = array_map(fn ($s) => (int) $s['id'], $state['services']);
+        $ticked = array_map('intval', array_filter((array) ($state['service_ids'] ?? []), 'is_numeric'));
+
+        return array_values(array_filter($offered, fn ($id) => in_array($id, $ticked, true)));
+    }
+
+    /** The ticked services by name, for the confirmation card. */
+    private function chosenServiceNames(array $state): string
+    {
+        $ids = $this->chosenServiceIds($state);
+
+        return implode(', ', array_map(
+            fn ($s) => $s['name'],
+            array_values(array_filter($state['services'] ?? [], fn ($s) => in_array((int) $s['id'], $ids, true)))
+        ));
+    }
+
+    /**
+     * A list of services belongs to one appointment type. When the type changes
+     * or is cleared - another doctor, another type, "start over" - the list and
+     * the ticks go with it.
+     */
+    private function syncServices(array &$state): void
+    {
+        $typeId = (int) ($state['appointment_type']['id'] ?? 0);
+
+        if (($state['services'] ?? []) && ($typeId < 1 || (int) ($state['services_for'] ?? 0) !== $typeId)) {
+            $state['services'] = [];
+            $state['services_for'] = null;
+            $state['service_ids'] = null;
+        }
+
+        if ($state['step'] === 'services' && empty($state['services'])) {
+            $state['step'] = 'appointment_type';
+        }
     }
 
     /* -----------------------------------------------------------------
@@ -5736,7 +6463,7 @@ class ChatController extends Controller
         $birth = (string) ($state['patient']['birth_date'] ?? '');
         $email = $state['patient']['email'] ?? null;
 
-        $result = $otp->send($mobile, $birth, $email, '', $this->language());
+        $result = $otp->send($mobile, $birth, $email, '', $this->language(), $state['patient']['country_code'] ?? null);
 
         if (!$result['sent']) {
             // Nothing was sent, so nothing is remembered and nothing is
@@ -5899,6 +6626,102 @@ class ChatController extends Controller
     }
 
     /** "send it again", "I didn't get it", "resend the code". */
+    /**
+     * Is the patient asking to use a different mobile number?
+     *
+     * Needs a change word AND the number - "change my gender", "send me a new
+     * code" and "my code is 7134" are not it - in English or German.
+     */
+    private function wantsToChangePhone(string $text): bool
+    {
+        // A code, even with words around it, is an answer to the question.
+        if ($this->readCode($text) !== null) {
+            return false;
+        }
+
+        $t = ' ' . $this->normalizeText($text) . ' ';
+        $number = '(?:phone|mobile|cell|cellphone|number|nr)';
+
+        $english = [
+            '/ (?:change|changing|update|edit|correct|fix|switch|replace|alter) (?:\w+ ){0,4}' . $number . ' /u',
+            '/ (?:wrong|incorrect|false) (?:\w+ )?' . $number . ' /u',
+            '/ (?:different|another|other|new) (?:phone|mobile|cell|cellphone)(?: (?:number|no|nr))? /u',
+            '/ (?:different|another|other|new) number /u',
+            '/ not my (?:phone |mobile |cell )?(?:number|phone|mobile) /u',
+        ];
+
+        foreach ($english as $pattern) {
+            if (preg_match($pattern, $t)) {
+                return true;
+            }
+        }
+
+        // German: a number word together with a word for changing, wrong, or another.
+
+        if (preg_match('/(?:nummer|handy|telefon|mobil)/u', $t)) {
+            if (preg_match('/ (?:ändern|aendern|andern|korrigieren|wechseln|ersetzen|aktualisieren|ändere|korrigiere)/u', $t)
+                || preg_match('/ (?:falsch|falsche|falschen|falscher|falsches|andere|anderen|anderes|neue|neuen|neues|nicht meine|stimmt nicht)/u', $t)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Forget the number (and the country chosen for it, and any verification
+     * earned for it) and ask for a number again. The date of birth and the other
+     * details given are kept. Nothing is sent, and the limits - which belong to
+     * the mobile number on the server - are untouched.
+     */
+    private function restartWithNewNumber(array &$state): array
+    {
+        unset($state['patient']['mobile_no'], $state['patient']['country_code'], $state['patient']['country']);
+
+        $state['otp_login'] = null;
+        $state['otp_verified'] = false;
+        $state['otp_verified_mobile'] = null;
+        $state['otp_attempts'] = 0;
+        $state['otp_resends'] = 0;
+        $state['country_options'] = [];
+        $state['country_free'] = false;
+        $state['pending_email'] = null;
+        $state['pending_email_heard'] = null;
+        $state['step'] = 'mobile_no';
+        $state['_handled'] = true;
+
+        return [$this->say("No problem - let's use a different number.")];
+    }
+
+    /**
+     * The four digit code in what the patient typed or said, or null.
+     *
+     * Digits may be separated by spaces or punctuation ("7 1 3 4", "7-1-3-4"),
+     * and a few harmless words may surround them ("my code is 7134", "mein Code
+     * ist 7134 bitte"). Any other word, any letter stuck to a digit, and any
+     * count of digits but four gives null.
+     */
+    private function readCode(string $text): ?string
+    {
+        $filler = [
+            'code', 'is', 'its', 'it', 'my', 'the', 'please', 'thanks', 'thank', 'you', 'number', 'here', 'yes', 'ok', 'okay', 'sorry',
+            'der', 'die', 'das', 'ist', 'mein', 'meine', 'bitte', 'danke', 'nummer', 'hier', 'ja',
+        ];
+
+        $tokens = preg_split('/[^\p{L}\p{N}]+/u', str_replace(["'", '’', '`'], '', mb_strtolower(trim($text))), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $digits = '';
+
+        foreach ($tokens as $token) {
+            if (preg_match('/^[0-9]+$/', $token)) {
+                $digits .= $token;
+            } elseif (!in_array($token, $filler, true)) {
+                return null;
+            }
+        }
+
+        return strlen($digits) === 4 ? $digits : null;
+    }
+
     private function wantsAnotherCode(string $text): bool
     {
         $value = $this->normalizeText($text);
@@ -5974,8 +6797,10 @@ class ChatController extends Controller
         }
 
         // Not a patient the practice holds, so the rest of the details the
-        // register API requires are collected from here on.
+        // register API requires are collected from here on - starting with where
+        // their mobile number is from, so the code goes to the right country.
         $state['step'] = $this->nextRegistrationStep('birth_date');
+        $this->askCountry($state, $client);
 
         return [$this->say("Thanks. I'll just need a few details to set you up.")];
     }
@@ -6316,6 +7141,17 @@ class ChatController extends Controller
             'doctor' => null,
             'appointment_types' => [],
             'appointment_type' => null,
+            // The services PureMed offered for the chosen type (id, name, ticked,
+            // locked), which type they were offered for, and which the patient
+            // ticked. exam_ids is built from these and from nothing else.
+            'services' => [],
+            'services_for' => null,
+            'service_ids' => null,
+            // The practice's country list while a new patient is asked where their number is from.
+            'country_options' => [],
+            'country_free' => false,
+            // True only when this conversation created the patient.
+            'new_patient' => false,
             'slots' => [],
             'slot_date' => null,
             'slot' => null,
@@ -6415,7 +7251,8 @@ class ChatController extends Controller
             'birth_date' => ['Just checking our records...'],
             'gender' => ['Registering your details...', 'Finding available doctors...'],
             'doctor' => ['Loading appointment types...'],
-            'appointment_type' => ['Checking available slots...'],
+            'appointment_type' => ['Loading the services...'],
+            'services' => ['Checking available slots...'],
             'slot_time' => ['Verifying that slot is still free...'],
             'confirm' => ['Booking your appointment...'],
             'cancel_select' => ['Fetching that appointment...'],
