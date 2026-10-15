@@ -290,7 +290,7 @@ class Translator
                 => fn ($m) => "Zu viele falsche Codes. Zu Ihrer Sicherheit ist die Bestätigung für {$m[1]} " . $n($m[1], 'Minute', 'Minuten') . ' gesperrt. Bitte versuchen Sie es später noch einmal oder rufen Sie die Praxis an.',
             '/^I have already sent several codes to this number\. For your security I cannot send another for (\d+) (?:minute|minutes) - please try again later or call the practice\.$/su'
                 => fn ($m) => "Ich habe bereits mehrere Codes an diese Nummer gesendet. Zu Ihrer Sicherheit kann ich für {$m[1]} " . $n($m[1], 'Minute', 'Minuten') . ' keinen weiteren senden – bitte versuchen Sie es später noch einmal oder rufen Sie die Praxis an.',
-            '/^Welcome back, (.+)\.$/su' => fn ($m) => "Willkommen zurück, {$m[1]}.",
+            '/^Welcome back, ([^!]+)\.$/su' => fn ($m) => "Willkommen zurück, {$m[1]}.",
             '/^Welcome back, (.+)! I have your details already\.$/su' => fn ($m) => "Willkommen zurück, {$m[1]}! Ich habe Ihre Daten bereits.",
             '/^Welcome back! I have your details already\.$/su' => fn ($m) => 'Willkommen zurück! Ich habe Ihre Daten bereits.',
             "/^Of course (.+) - let's book another appointment\\. I still have your details\\.$/su" => fn ($m) => "Gerne {$m[1]} – buchen wir einen weiteren Termin. Ich habe Ihre Daten noch.",
