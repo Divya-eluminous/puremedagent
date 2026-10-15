@@ -50,6 +50,7 @@ class ConsentRules
         'appointment', 'booking', 'one', 'for', 'me', 'my', 'and', 'i', 'id', 'would', 'like', 'to',
         'want', 'lets', 'let', 'us', 'do', 'go', 'sounds', 'is', 'am', 'then', 'now', 'so', 'just',
         'very', 'much', 'all', 'time', 'sir', 'there', 'yes', 'looks', 'look',
+        'can', 'may',
     ];
 
     /**

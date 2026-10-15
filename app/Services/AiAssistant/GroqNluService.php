@@ -25,7 +25,7 @@ use Throwable;
  * answer is always expressed in English terms - "tomorrow", "Friday", "morning"
  * - because the PureMed rules that act on it work on one vocabulary.
  */
-class GroqNluService implements NluDriver
+class GroqNluService implements NluProvider
 {
     /**
      * Steps allowed to use NLU.
@@ -36,44 +36,18 @@ class GroqNluService implements NluDriver
      * checks this too - it is asserted here as well so a future caller cannot
      * quietly widen the surface.
      */
-    private const ELIGIBLE_STEPS = [
-        'intent',
-        'doctor',
-        'appointment_type',
-        'slot_date',
-        'slot_time',
-        'confirm',
-        'cancel_select',
-        'cancel_confirm',
-        'appointments',
-    ];
+    private const ELIGIBLE_STEPS = NluContract::ELIGIBLE_STEPS;
 
-    private const INTENTS = [
-        'book_appointment',
-        'view_appointments',
-        'cancel_appointment',
-        'select_doctor',
-        'change_doctor',
-        'select_appointment_type',
-        'change_appointment_type',
-        'select_slot',
-        'change_slot',
-        'select_slot_preference',
-        'change_date',
-        'request_slots',
-        'confirm_booking',
-        'reject_booking',
-        'unknown',
-    ];
+    private const INTENTS = NluContract::INTENTS;
 
-    private const TIME_PREFERENCES = ['morning', 'afternoon', 'evening'];
+    private const TIME_PREFERENCES = NluContract::TIME_PREFERENCES;
 
     /** Keep prompts small: cost control, and a long message is not a selection. */
-    private const MAX_MESSAGE_CHARS = 200;
-    private const MAX_OPTIONS = 40;
-    private const MAX_OPTION_CHARS = 80;
+    private const MAX_MESSAGE_CHARS = NluContract::MAX_MESSAGE_CHARS;
+    private const MAX_OPTIONS = NluContract::MAX_OPTIONS;
+    private const MAX_OPTION_CHARS = NluContract::MAX_OPTION_CHARS;
 
-    private const LANGUAGES = ['en', 'de'];
+    private const LANGUAGES = NluContract::LANGUAGES;
 
     /**
      * What happened on the last interpret(), so the caller can tell a message
@@ -88,12 +62,12 @@ class GroqNluService implements NluDriver
      *  rate_limited  Groq answered 429, or the shared budget said wait
      *  unavailable   not configured, an error response, or the network is down
      */
-    public const OUTCOME_OK = 'ok';
-    public const OUTCOME_UNRECOGNIZED = 'unrecognized';
-    public const OUTCOME_TIMEOUT = 'timeout';
-    public const OUTCOME_MALFORMED = 'malformed';
-    public const OUTCOME_RATE_LIMITED = 'rate_limited';
-    public const OUTCOME_UNAVAILABLE = 'unavailable';
+    public const OUTCOME_OK = NluOutcome::OK;
+    public const OUTCOME_UNRECOGNIZED = NluOutcome::UNRECOGNIZED;
+    public const OUTCOME_TIMEOUT = NluOutcome::TIMEOUT;
+    public const OUTCOME_MALFORMED = NluOutcome::MALFORMED;
+    public const OUTCOME_RATE_LIMITED = NluOutcome::RATE_LIMITED;
+    public const OUTCOME_UNAVAILABLE = NluOutcome::UNAVAILABLE;
 
     /** The outcomes where the AI itself could not be used. */
     public const FAILURES = [
@@ -273,6 +247,17 @@ class GroqNluService implements NluDriver
             return null;
         }
 
+        // The model declined to answer (a `refusal` where the content would be).
+        // That is a broken contract, not a message it could not read, so it is
+        // a failure the fallback provider may be asked about.
+        if (filled(data_get($response->json(), 'choices.0.message.refusal'))) {
+            $this->outcome = self::OUTCOME_MALFORMED;
+
+            Log::warning('AI assistant NLU: provider refused', ['provider' => 'groq', 'step' => $step]);
+
+            return null;
+        }
+
         $content = data_get($response->json(), 'choices.0.message.content');
 
         if (!is_string($content) || $content === '') {
@@ -339,9 +324,16 @@ class GroqNluService implements NluDriver
      * NLU is optional. No key, no model, or switched off means the assistant
      * simply carries on with its deterministic matching.
      */
+    public function available(): bool
+    {
+        return $this->enabled();
+    }
+
     private function enabled(): bool
     {
-        return (bool) config('ai-assistant.groq.enabled')
+        // Never contacted unless NLU_DRIVER or NLU_FALLBACK names it.
+        return NluRoles::selected('groq')
+            && (bool) config('ai-assistant.groq.enabled')
             && filled(config('ai-assistant.groq.api_key'))
             && filled(config('ai-assistant.groq.model'))
             && filled(config('ai-assistant.groq.endpoint'));
@@ -388,36 +380,7 @@ class GroqNluService implements NluDriver
             return $this->compactPrompt($language);
         }
 
-        return $this->languageRule($language) . 'You interpret a patient message for a medical appointment booking assistant. '
-            . 'Decide what the patient means in the context of the CURRENT STEP. '
-            . '"entity" must be copied exactly from the option list, character for character, or null. '
-            . '"ordinal" is the number of that same option, or null. entity and ordinal must always refer '
-            . 'to the SAME option. Never invent a doctor, appointment type, date, time or availability, '
-            . 'and never refer to anything not in the list. You do not decide what is available and you '
-            . 'never book anything. '
-            . 'Use request_slots when the patient is asking to SEE the available times rather than '
-            . 'rejecting anything, for example "you have not shown me the slots", "what times are '
-            . 'available", "let me see the available times", "are there any other times". '
-            . 'Use reject_booking only when they are declining the appointment itself. '
-            . 'When the patient wants to swap something in CURRENT SELECTION, use the intent for the '
-            . 'part they are changing: change_doctor ("another doctor", "someone else"), '
-            . 'change_appointment_type, change_date ("what about Friday", "any day next week") or '
-            . 'change_slot ("another time", "something later"). Change only what they actually '
-            . 'mentioned: "another time" does not change the date, and "another doctor" does not '
-            . 'change the appointment type or the time. A patient may change two things at once, for '
-            . 'example "another doctor tomorrow" - return change_doctor and put the day in "date". '
-            . 'Use select_slot_preference when they name only a part of the day, such as "morning". '
-            . 'Use view_appointments for any question ABOUT appointments the patient already has, '
-            . 'for example "how many appointments do I have", "when is my next appointment", '
-            . '"do I have any appointments", "what appointments are coming up", "list my appointments". '
-            . 'Those are questions, not requests to make a new booking - use book_appointment only when '
-            . 'they want a NEW appointment. '
-            . 'CURRENT SELECTION is background only. Never copy anything out of it into your answer: '
-            . '"date" and "time" must be the patient\'s own words, and must be null when the patient '
-            . 'did not mention a day or a time. '
-            . 'If the patient does not mind which option, return the select intent with entity and '
-            . 'ordinal both null - never pick one for them. '
-            . 'If you are unsure, return intent "unknown" with a low confidence.';
+        return NluContract::systemPrompt($language);
     }
 
     /**
@@ -451,30 +414,6 @@ class GroqNluService implements NluDriver
     }
 
     /**
-     * The patient may write in English or German, and the labels may be in
-     * either. Everything the model returns is expressed in English terms.
-     */
-    private function languageRule(string $language): string
-    {
-        $rule = 'The patient may write in English or German, and option labels may be in either language. '
-            . 'Understand both, but ALWAYS return "date" and "time_preference" in English terms '
-            . '("tomorrow", "day after tomorrow", "Friday", "next Monday", "13 August", "morning", '
-            . '"afternoon", "evening") whatever language the patient used. German examples: '
-            . '"morgen" is tomorrow, "übermorgen" is day after tomorrow, "Vormittag" and "morgens" are '
-            . 'morning, "Nachmittag" is afternoon, "abends" is evening, "Montag" to "Sonntag" are '
-            . 'Monday to Sunday, "nächste Woche" is next week, "um 14 Uhr" is time 14:00, '
-            . '"ja" means yes and "nein" means no, "ein anderer Arzt" is change_doctor, '
-            . '"meine Termine" is view_appointments, "Termin absagen" or "stornieren" is cancel_appointment, '
-            . '"Termin buchen" or "ich möchte einen Termin" is book_appointment. ';
-
-        if ($language === 'de') {
-            $rule .= 'The patient is currently writing in German. ';
-        }
-
-        return $rule;
-    }
-
-    /**
      * Only the step name, the option labels the patient can already see, and
      * their message. No identifiers, no tokens, no patient details.
      *
@@ -482,45 +421,7 @@ class GroqNluService implements NluDriver
      */
     private function userPrompt(string $step, array $optionLabels, string $message, ?string $previousAssistantMessage = null, array $context = []): string
     {
-        $prompt = 'CURRENT STEP: ' . $step . "\n";
-
-        // What the patient has chosen so far, as the labels already on their
-        // screen. Without this "another doctor" and "another time" look
-        // identical to the model. Labels only - never ids, never patient data.
-        $selection = array_filter([
-            'Doctor' => $context['doctor'] ?? null,
-            'Appointment' => $context['appointment'] ?? null,
-            'Date' => $context['date'] ?? null,
-            'Time' => $context['time'] ?? null,
-        ]);
-
-        if ($selection) {
-            $prompt .= "CURRENT SELECTION:\n";
-
-            foreach ($selection as $label => $value) {
-                $prompt .= '- ' . $label . ': ' . mb_substr((string) $value, 0, self::MAX_OPTION_CHARS) . "\n";
-            }
-        }
-
-        $options = array_slice(array_values(array_filter($optionLabels)), 0, self::MAX_OPTIONS);
-
-        if ($options) {
-            $prompt .= "AVAILABLE OPTIONS:\n";
-
-            foreach ($options as $index => $label) {
-                $prompt .= ($index + 1) . '. ' . mb_substr((string) $label, 0, self::MAX_OPTION_CHARS) . "\n";
-            }
-        }
-
-        // One line of context - what the assistant just said - so a reply like
-        // "you haven't shown me the slots" can be read against the question it
-        // answers. Never the whole conversation, and never patient details.
-        if ($previousAssistantMessage) {
-            $prompt .= "PREVIOUS ASSISTANT MESSAGE:\n\""
-                . mb_substr($previousAssistantMessage, 0, self::MAX_MESSAGE_CHARS) . "\"\n";
-        }
-
-        return $prompt . "\nPATIENT MESSAGE:\n\"" . mb_substr($message, 0, self::MAX_MESSAGE_CHARS) . '"';
+        return NluContract::userPrompt($step, $optionLabels, $message, $previousAssistantMessage, $context);
     }
 
     /**
@@ -575,80 +476,22 @@ class GroqNluService implements NluDriver
 
     /**
      * Trust nothing. A reply that does not fit the contract is discarded, and
-     * the assistant falls back to deterministic matching.
+     * the assistant falls back to deterministic matching (or, when it is
+     * switched on, to the fallback provider - for a broken reply, never for one
+     * that was merely not useful).
      *
      * @param  array<string, mixed>  $decoded
      * @return array<string, mixed>|null
      */
     private function validate(array $decoded, string $step): ?array
     {
-        $intent = $decoded['intent'] ?? null;
+        [$result, $this->outcome] = NluContract::validate(
+            $decoded,
+            $step,
+            (float) config('ai-assistant.groq.min_confidence', 0.6),
+            'groq'
+        );
 
-        // Outside the schema: not an intent we know. That is a broken reply,
-        // not a message the AI could not read.
-        if (!is_string($intent) || !in_array($intent, self::INTENTS, true)) {
-            $this->outcome = self::OUTCOME_MALFORMED;
-
-            return null;
-        }
-
-        // The model's own "I don't know".
-        if ($intent === 'unknown') {
-            $this->outcome = self::OUTCOME_UNRECOGNIZED;
-
-            return null;
-        }
-
-        $confidence = $decoded['confidence'] ?? null;
-
-        if (!is_numeric($confidence)) {
-            $this->outcome = self::OUTCOME_MALFORMED;
-
-            return null;
-        }
-
-        $confidence = (float) $confidence;
-        $minimum = (float) config('ai-assistant.groq.min_confidence', 0.6);
-
-        if ($confidence < $minimum) {
-            $this->outcome = self::OUTCOME_UNRECOGNIZED;
-
-            Log::info('AI assistant NLU: below confidence threshold', [
-                'step' => $step,
-                'intent' => $intent,
-                'confidence' => $confidence,
-            ]);
-
-            return null;
-        }
-
-        $ordinal = $decoded['ordinal'] ?? null;
-        $ordinal = is_int($ordinal) && $ordinal >= 1 ? $ordinal : null;
-
-        $timePreference = $decoded['time_preference'] ?? null;
-        $timePreference = in_array($timePreference, self::TIME_PREFERENCES, true) ? $timePreference : null;
-
-        $this->outcome = self::OUTCOME_OK;
-
-        return [
-            'intent' => $intent,
-            'entity' => $this->text($decoded['entity'] ?? null),
-            'ordinal' => $ordinal,
-            'date' => $this->text($decoded['date'] ?? null),
-            'time_preference' => $timePreference,
-            'time' => $this->text($decoded['time'] ?? null),
-            'confidence' => $confidence,
-        ];
-    }
-
-    private function text(mixed $value): ?string
-    {
-        if (!is_string($value)) {
-            return null;
-        }
-
-        $value = trim(mb_substr($value, 0, self::MAX_OPTION_CHARS));
-
-        return $value === '' ? null : $value;
+        return $result;
     }
 }

@@ -125,8 +125,10 @@ return [
     | at request time. With GROQ_MODEL or GROQ_API_KEY unset the assistant tells
     | the patient the AI is temporarily unavailable; buttons keep working.
     |
-    | NLU_DRIVER is 'groq' by default. Any other value switches the AI off
-    | entirely (used by the automated tests, which run on the rules alone).
+    | NLU_DRIVER picks the PRIMARY provider: groq (default), claude, or none.
+    | none, empty or any other value switches ALL AI off (the automated tests
+    | run this way, on the rules alone) and a warning is logged for a value
+    | that is not recognised. See NLU_FALLBACK below for the optional second one.
     |
     */
     'nlu_driver' => env('NLU_DRIVER', 'groq'),
@@ -232,6 +234,93 @@ return [
             // Never trust a Retry-After longer than this (seconds).
             'max_backoff_seconds' => (int) env('GROQ_MAX_BACKOFF', 300),
             'cache_store' => env('GROQ_RATE_CACHE_STORE'),
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Fallback provider - OFF unless explicitly enabled
+    |--------------------------------------------------------------------------
+    |
+    | With NLU_DRIVER=groq and NLU_FALLBACK=claude, Claude is asked ONLY when
+    | Groq could not be used (and the other way round for claude / groq): a timeout, a rate limit (including this
+    | application's own budget for it), an outage or network failure, or an
+    | answer that was malformed, cut short or refused. A message Groq read but
+    | could not use ("unknown", low confidence) is NOT a failure and never
+    | reaches Claude: it goes straight on to the rule-based flow.
+    |
+    | Whatever Claude returns passes through the same guard and the same
+    | deterministic consent rules as Groq's answers. It cannot book or cancel.
+    |
+    | NLU_FALLBACK is none (default), groq or claude, and names the provider
+    | asked when the PRIMARY (NLU_DRIVER) fails. It is ignored, with a logged
+    | warning, if it is invalid or the same as the primary; a valid primary keeps
+    | working. A provider that is neither the primary nor the fallback is never
+    | contacted: with NLU_DRIVER=groq and NLU_FALLBACK=none, no request is ever
+    | made to Anthropic. NLU_DRIVER=none switches off ALL AI, fallback included.
+    |
+    | DATA SENT to Anthropic, per call, and nothing else: the step name; the
+    | labels of the options already on the patient's screen; what they have
+    | chosen so far (labels only); the assistant's last line; and the patient's
+    | one message - each cut short. Never an identifier, a token, a name, a
+    | mobile number, a date of birth, an email address or a code: the
+    | registration and verification steps never reach any AI provider.
+    |
+    */
+    'nlu_fallback' => env('NLU_FALLBACK', 'none'),
+
+    // Which Groq failures may ask Claude. Any of: timeout, rate_limited,
+    // unavailable, malformed. ("unrecognized" is never a trigger.)
+    'nlu_fallback_on' => array_values(array_filter(array_map('trim', explode(',', (string) env('NLU_FALLBACK_ON', 'timeout,rate_limited,unavailable,malformed'))))),
+
+    'claude' => [
+        'enabled' => (bool) env('CLAUDE_NLU_ENABLED', true),
+        // From the environment only. Never written down here, never sent to a
+        // view or a response, never logged.
+        'api_key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('CLAUDE_MODEL', 'claude-haiku-5-5'),
+        'endpoint' => env('CLAUDE_ENDPOINT', 'https://api.anthropic.com/v1/messages'),
+        'version' => env('CLAUDE_API_VERSION', '2023-06-01'),
+
+        // Explicit, because the SDK defaults would not do. No automatic retry of
+        // a 429 or a 5xx, ever (asking again straight away spends a budget that
+        // has just been refused). Only a dropped CONNECTION may be retried, and
+        // by default it is not: this is the fallback, and every second counts.
+        'timeout' => (int) env('CLAUDE_TIMEOUT', 6),
+        'connect_retries' => (int) env('CLAUDE_CONNECT_RETRIES', 0),
+
+        'max_tokens' => (int) env('CLAUDE_MAX_TOKENS', 400),
+        // Haiku 5.5 thinks by default and thinking counts against max_tokens. For
+        // a one-line classification: thinking off, effort low. 'disabled' |
+        // 'adaptive' | 'omit' (send nothing; for a model that rejects "disabled").
+        'thinking' => env('CLAUDE_THINKING', 'disabled'),
+        'effort' => env('CLAUDE_EFFORT', 'low'),
+        // The same bar as Groq's answers must clear.
+        'min_confidence' => (float) env('CLAUDE_MIN_CONFIDENCE', 0.6),
+
+        /*
+        | Claude's own budget. Entirely separate from Groq's: a pause for one never
+        | stops the other. Anthropic limits INPUT tokens per minute separately
+        | (ITPM), which is what is tracked. These are working numbers, deliberately
+        | well under the lowest standard tier (2,000,000 ITPM, 1,000 requests a
+        | minute); the limiter replaces them with what the response headers say,
+        | taking the lower. A new account may be on a lower "Evaluation" tier, so
+        | the real figure is on the Console rate-limits page.
+        */
+        'rate_limit' => [
+            'enabled' => (bool) env('CLAUDE_RATE_LIMIT_ENABLED', true),
+            'tokens_per_minute' => (int) env('CLAUDE_TOKENS_PER_MINUTE', 200000),
+            'requests_per_day' => (int) env('CLAUDE_REQUESTS_PER_DAY', 0),   // 0 = no daily cap of our own
+            'safety_margin' => (float) env('CLAUDE_RATE_SAFETY_MARGIN', 0.1),
+            'estimated_prompt_tokens' => (int) env('CLAUDE_ESTIMATED_PROMPT_TOKENS', 1500),
+            'default_backoff_seconds' => (int) env('CLAUDE_DEFAULT_BACKOFF', 30),
+            'max_backoff_seconds' => (int) env('CLAUDE_MAX_BACKOFF', 300),
+            // The monthly SPEND CAP answers 429 with no Retry-After and no reset
+            // time that retrying could hasten: it lasts until the month turns
+            // over. Pausing for seconds would mean asking, and being refused,
+            // again and again. This is how long to stand down instead.
+            'spend_cap_backoff_seconds' => (int) env('CLAUDE_SPEND_CAP_BACKOFF', 3600),
+            'cache_store' => env('CLAUDE_RATE_CACHE_STORE'),
         ],
     ],
 ];

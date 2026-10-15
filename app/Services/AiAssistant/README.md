@@ -61,6 +61,31 @@ The file cache is correct for **one application server only**. With several serv
 
 **The default cache store is `file`, which is correct for ONE application server only.** With several servers each has its own files and each would spend the whole Groq budget. Before running more than one server, use a shared store (Redis, Memcached or the database) and set `GROQ_RATE_CACHE_STORE` to it.
 
+## Choosing the AI provider (`NLU_DRIVER` and `NLU_FALLBACK`)
+
+Either Groq or Claude (Anthropic, `claude-haiku-5-5`) can be the primary provider, and the other can be an optional fallback. Switching is `.env` only, then `php artisan config:clear`. No code change.
+
+| `NLU_DRIVER` | `NLU_FALLBACK` | Behaviour | Needs in `.env` |
+|---|---|---|---|
+| `groq` (**current**) | `none` (**current**) | Groq only. Anthropic is never contacted. | `GROQ_API_KEY`, `GROQ_MODEL` |
+| `groq` | `claude` | Groq first; Claude only when Groq fails. | the above + `ANTHROPIC_API_KEY` |
+| `claude` | `none` | Claude only. Groq is never contacted. | `ANTHROPIC_API_KEY` |
+| `claude` | `groq` | Claude first; Groq only when Claude fails. | both keys |
+| `none` | any | No AI at all (rules and buttons only). | nothing |
+
+- **Mistakes are safe.** An invalid `NLU_DRIVER` (anything but groq, claude, none) switches ALL AI off. An invalid `NLU_FALLBACK`, or one equal to the primary, disables only the fallback; a valid primary keeps working. Each mistake logs one warning an hour (the setting name and the value cut short, never a secret or a patient's message). A provider that is neither the primary nor the fallback is never contacted, and a selected provider without its key is treated as unavailable.
+- **What asks the fallback:** only a failure of the primary - timeout, rate limit (including this application's own budget), outage or network failure, or an answer that was malformed, cut short or refused. A message the primary read but could not use ("unknown", low confidence, an answer the guard rejected) is not a failure: it goes straight to the rule-based flow with no second model.
+- **Same safeguards for both providers:** the same prompt contract and response validation (`NluContract`), the same `NluManager::guard()`, the same deterministic `ConsentRules`, OTP verification, booking and cancellation rules. Neither provider can book, cancel or consent. Registration and verification steps never reach either provider.
+- **Separate budgets:** each provider has its own limiter (`GROQ_*`, `CLAUDE_*`). A 429 is never retried; `Retry-After` and the provider's rate-limit headers are respected. Anthropic's monthly spend cap (429, `enforced_spend_limit_reached`) stands Claude down for `CLAUDE_SPEND_CAP_BACKOFF` seconds (3600). A limiter that cannot be read refuses the call. When both providers are limited the shorter wait is reported ("very busy").
+- **Claude settings:** `CLAUDE_MODEL`, `CLAUDE_TIMEOUT` (6), `CLAUDE_CONNECT_RETRIES` (0), `CLAUDE_MAX_TOKENS` (400), `CLAUDE_THINKING` (disabled), `CLAUDE_EFFORT` (low), `CLAUDE_MIN_CONFIDENCE` (0.6), `CLAUDE_TOKENS_PER_MINUTE` (200000), `CLAUDE_REQUESTS_PER_DAY` (0 = none), `CLAUDE_RATE_SAFETY_MARGIN`, `CLAUDE_DEFAULT_BACKOFF`, `CLAUDE_MAX_BACKOFF`. `NLU_FALLBACK_ON` lists which failures may ask the fallback (`timeout,rate_limited,unavailable,malformed`, default all). The key is read from `ANTHROPIC_API_KEY` only; it is never in code, git or logs.
+- **The cache store must be shared (Redis) when more than one server runs**, as for Groq.
+
+**Privacy - using Claude at all, and especially as the primary.** Per call, Anthropic receives: the step name, the labels of the options on the patient's screen, the choices made so far (labels), the assistant's last line, and the patient's one message, each cut short. No identifiers, tokens, mobile numbers, dates of birth, email addresses or codes. But the patient's free text can contain whatever they type, so it is personal data. As the **fallback**, only the messages Groq failed on go to Anthropic. As the **primary**, EVERY AI-handled message does, so the practice's data-sharing approval must cover all traffic. To confirm with the practice before enabling: their data-sharing policy, Anthropic's API retention terms (and any zero-data-retention arrangement), and whether a data-processing agreement is needed.
+
+**Cost** (an estimate to confirm from real `usage`): about 1,500 input + 100 output tokens per call, about $0.0002 at $0.10 / $0.50 per million tokens. As the fallback it is paid only when the primary fails; as the primary, on every AI-handled message.
+
+**Rollback:** set `NLU_DRIVER=groq` and `NLU_FALLBACK=none` (or remove `ANTHROPIC_API_KEY`), then `php artisan config:clear`. To stop all AI: `NLU_DRIVER=none`.
+
 ## German wording
 
 The German consent and filler word lists in `ConsentRules` (the `GERMAN_*` constants) and the German messages in `Translator` are a first draft. **They must be reviewed by a native German speaker or the practice before production.**
