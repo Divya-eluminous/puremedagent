@@ -37,9 +37,22 @@ class RouteServiceProvider extends ServiceProvider
     {
         $this->mapApiRoutes();
 
+        // Before the web routes: web.php ends in a catch-all GET /{slug} that would capture /ai-assistant.
+        $this->mapAssistantRoutes();
+
         $this->mapWebRoutes();
 
         //
+    }
+
+    /**
+     * The AI assistant's routes: the "web" stack with a session of its own. See AssistantSessionConfig.
+     */
+    protected function mapAssistantRoutes()
+    {
+        Route::middleware('assistant')
+             ->namespace($this->namespace)
+             ->group(base_path('routes/assistant.php'));
     }
 
     /**

@@ -127,6 +127,24 @@ Reading it: `grep "timing: turn" storage/logs/laravel-*.log`. If `ai_ms` is most
 
 The German consent and filler word lists in `ConsentRules` (the `GERMAN_*` constants) and the German messages in `Translator` are a first draft. **They must be reviewed by a native German speaker or the practice before production.**
 
+## Own session for the assistant
+
+The assistant keeps its conversation in its own session (cookie `puremed_assistant_session`, files in a
+`sessions-assistant` folder next to the normal session folder), separate from the admin panel's `laravel_session`.
+Before this, an admin page open in the same browser could save its (older) session over the assistant's and send the
+patient back to the first question. The four assistant routes are in `routes/assistant.php` under the `assistant`
+middleware group; the admin session and the global session settings are untouched.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AI_ASSISTANT_DEDICATED_SESSION` | `true` | `false` = back to the shared session (rollback switch) |
+| `AI_ASSISTANT_SESSION_COOKIE` | `puremed_assistant_session` | cookie name |
+| `AI_ASSISTANT_SESSION_PATH` | next to `session.files` | folder; must be writable by the web user, and shared between servers if there are several |
+
+If the folder cannot be created or written, the assistant falls back to the shared session and logs a warning.
+On deploy: create/permit the folder, `php artisan route:clear` and `php artisan config:clear`. Conversations in progress
+at the moment of deployment start over once (new cookie).
+
 ## Tests
 
 Run any suite with `php tests/ai-assistant/<name>_test.php`. The live-tenant suites need the dedicated test patients: `php tests/ai-assistant/fixtures/seed_test_patients.php` (it refuses to run unless the environment is `test`/`local` with a local database; `--status` changes nothing, `--remove` deletes only those rows). `tests/ai-assistant/tools/prompt_compare.php` is a live comparison tool and is never run by the suites.

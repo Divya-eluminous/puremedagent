@@ -114,6 +114,15 @@ return [
     // practice's own country list), and the code is texted and saved with that country code. false =
     // ROLLBACK: nothing is asked and default_country_code (0043, Austria) applies, as before.
     'ask_country' => (bool) env('AI_ASSISTANT_ASK_COUNTRY', true),
+    // The assistant keeps its conversation in a session of its own (its own cookie and folder), so a
+    // page of the admin panel open in the same browser cannot overwrite it - file sessions save the
+    // whole session at the end of every request, and the last writer wins. Lifetime, encryption and
+    // the cookie flags are NOT changed: they stay the application's. false = ROLLBACK (shared session).
+    'dedicated_session' => (bool) env('AI_ASSISTANT_DEDICATED_SESSION', true),
+    'session_cookie' => env('AI_ASSISTANT_SESSION_COOKIE', 'puremed_assistant_session'),
+    // null = a folder called sessions-assistant beside the normal session folder (wherever that is,
+    // including shared storage). It must be writable by the web server's user.
+    'session_path' => env('AI_ASSISTANT_SESSION_PATH'),
     // An answer that names one option exactly ("Dr Anna Patel", "the second one", "die zweite")
     // is read by the rules without asking an AI, when the rules provably pick the same option.
     // false = ROLLBACK: every free-text answer on those steps goes to the AI first, as before.

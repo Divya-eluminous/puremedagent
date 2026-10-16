@@ -19,11 +19,6 @@ Route::post('/testingpdf', 'Web\AppointmentWebController@uploadtestpdf')->name('
 
 Route::get('/download-pdf', 'Web\AppointmentWebController@downloadpdf')->name('downladPdf');
 
-Route::get('/ai-assistant', 'AiAssistant\ChatController@index')->name('ai-assistant.index');
-Route::post('/ai-assistant/message', 'AiAssistant\ChatController@converse')->name('ai-assistant.message');
-Route::post('/ai-assistant/reset', 'AiAssistant\ChatController@reset')->name('ai-assistant.reset');
-Route::post('/ai-assistant/edit', 'AiAssistant\ChatController@edit')->name('ai-assistant.edit');
-
 
 //Added by Shyam 27-01-22
 Route::get('/cancelAppointment/{id}', 'Admin\DashboardController@cancelAppointment');

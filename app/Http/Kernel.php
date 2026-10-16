@@ -39,6 +39,20 @@ class Kernel extends HttpKernel
             \App\Http\Middleware\EnforceTenancy::class,
         ],
 
+        // The AI assistant: the same stack as "web", with a session of its own and a CSRF check that
+        // does not write the shared XSRF-TOKEN cookie (see AssistantSessionConfig).
+        'assistant' => [
+            \App\Http\Middleware\AssistantSessionConfig::class,
+            \App\Http\Middleware\EncryptCookies::class,
+            \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
+            \Illuminate\Session\Middleware\StartSession::class,
+            \Illuminate\View\Middleware\ShareErrorsFromSession::class,
+            \App\Http\Middleware\AssistantVerifyCsrfToken::class,
+            \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\Localization::class,
+            \App\Http\Middleware\EnforceTenancy::class,
+        ],
+
         'api' => [
             'throttle:60,1',
             'bindings',
