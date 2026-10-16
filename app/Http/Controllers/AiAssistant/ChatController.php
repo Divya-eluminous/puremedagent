@@ -1092,6 +1092,15 @@ class ChatController extends Controller
 
         // "Show more" just reveals the next page of chips for the same question.
         if ($choiceValue === self::MORE || $this->wantsMore($text)) {
+            // Nothing left to reveal: say so, rather than "here are a few more"
+            // over the very same chips.
+            if ($choiceValue === '' && ($nothingMore = $this->nothingMoreToShow($state)) !== null) {
+                $state['_no_prompt'] = true;
+                $state['_handled'] = true;
+
+                return [$this->say($nothingMore)];
+            }
+
             $state['chip_page'] = ($state['chip_page'] ?? 0) + 1;
             $state['_no_prompt'] = true;
             // The rules have answered this; the LLM must not read it as a choice.
@@ -5034,6 +5043,38 @@ class ChatController extends Controller
             . '|that will be all|all good|i m good|im good|i m fine|im fine)\b/u',
             $value
         ) === 1;
+    }
+
+    /**
+     * The answer to "show me more" when every chip of the current question is
+     * already on screen, or null when there really is more to show.
+     */
+    private function nothingMoreToShow(array $state): ?string
+    {
+        $step = (string) ($state['step'] ?? '');
+
+        $total = match ($step) {
+            'doctor' => count($state['doctors'] ?? []),
+            'slot_date' => count($this->dateCards($state['slots'] ?? [])),
+            'slot_time' => count($this->timeCards($state['slots'] ?? [], $state['slot_date'] ?? null, $state['slot_window'] ?? null)),
+            default => null,
+        };
+
+        if ($total === null) {
+            return null;
+        }
+
+        $shown = max(3, (int) config('ai-assistant.chips_per_page', 6)) * (1 + (int) ($state['chip_page'] ?? 0));
+
+        if ($total > $shown) {
+            return null;
+        }
+
+        return match ($step) {
+            'doctor' => "Those are all the doctors I have. Please pick one from the list.",
+            'slot_time' => "Those are all the free times for that day. Please pick one, or choose another day.",
+            default => "Those are all the free days I can see right now. Please pick one, or tell me a day that suits you.",
+        };
     }
 
     /**

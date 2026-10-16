@@ -77,6 +77,9 @@ class Translator
 
         // Intent and navigation
         'Of course - here are a few more.' => 'Gerne – hier sind noch einige weitere.',
+        'Those are all the doctors I have. Please pick one from the list.' => 'Das sind alle Ärztinnen und Ärzte, die ich habe. Bitte wählen Sie aus der Liste.',
+        'Those are all the free times for that day. Please pick one, or choose another day.' => 'Das sind alle freien Zeiten an diesem Tag. Bitte wählen Sie eine aus oder einen anderen Tag.',
+        'Those are all the free days I can see right now. Please pick one, or tell me a day that suits you.' => 'Das sind alle freien Tage, die ich gerade sehe. Bitte wählen Sie einen aus oder nennen Sie mir einen Tag, der Ihnen passt.',
         "Of course - let's book another appointment. I still have your details." => 'Gerne – buchen wir einen weiteren Termin. Ich habe Ihre Daten noch.',
         "Sure - let's start a new booking." => 'Gerne – beginnen wir eine neue Buchung.',
         'Sure, let me show you the doctors again.' => 'Gerne, ich zeige Ihnen die Ärztinnen und Ärzte noch einmal.',
