@@ -1948,6 +1948,16 @@ class ChatController extends Controller
 
                 return [$this->say("I can book a new appointment or cancel one for you - just say which.")];
 
+            case 'otp_failed':
+                // A dead end with nothing left to ask. "ok" or "thank you" is the patient
+                // taking the news, so answer it with a goodbye rather than the same
+                // "please call the practice" line again. Nothing else is accepted here.
+                if ($choiceValue === '' && ($this->saidNothingElse($text) || $this->acknowledges($text))) {
+                    return $this->closeConversation($state);
+                }
+
+                return [];
+
             case 'cancelled':
             case 'closed':
                 // "Is there anything else?" has just been asked, so a plain
@@ -5024,6 +5034,18 @@ class ChatController extends Controller
             . '|that will be all|all good|i m good|im good|i m fine|im fine)\b/u',
             $value
         ) === 1;
+    }
+
+    /**
+     * A bare acknowledgement - "ok", "ok ok", "alright", "bye". Only used at a dead end,
+     * where there is nothing to answer, so it can never be read as an intent.
+     */
+    private function acknowledges(string $text): bool
+    {
+        $value = $this->normalizeText($text);
+
+        return $value !== ''
+            && preg_match('/^(?:(?:ok|okay|okey|k|alright|all right|fine|got it|i see|understood|sure|bye|goodbye|see you|tschüss|tschuss|tschus|ciao|ok danke|alles klar|gut|verstanden)(?:\s+|$))+$/u', $value) === 1;
     }
 
     /**
