@@ -739,6 +739,16 @@ class ChatController extends Controller
             return true;
         }
 
+        // A named clock time, and the answers to the questions asked about one,
+        // are the rules' to settle: a model would pick a period for the patient.
+        if ($step === 'slot_time' && $this->slotsOn($state['slots'] ?? [], $state['slot_date'] ?? null) !== [] && (
+            !empty($state['offer_other_date'])
+            || is_array($state['time_ambiguous'] ?? null)
+            || $this->parseTimeRequest($text) !== null
+        )) {
+            return true;
+        }
+
         return false;
     }
 
@@ -1792,6 +1802,22 @@ class ChatController extends Controller
                 return [];
 
             case 'slot_time':
+                // After "...Would you like to try another date?" a yes goes to the days.
+                if (!empty($state['offer_other_date'])) {
+                    $state['offer_other_date'] = false;
+
+                    if ($choiceValue === '' && $this->saidYes('', $text)) {
+                        $state['slot_date'] = null;
+                        $state['slot_window'] = null;
+                        $state['slot'] = null;
+                        $state['step'] = 'slot_date';
+                        $state['_handled'] = true;
+                        $state['_no_prompt'] = true;
+
+                        return [$this->say('Of course - which of these days would you prefer?')];
+                    }
+                }
+
                 // "are there any other times?" and "I don't want this one" both
                 // mean the same thing here: show the list again. Neither should
                 // reach the LLM or fall through to "I didn't catch that time".
@@ -1842,6 +1868,14 @@ class ChatController extends Controller
                 // slot on the day already on screen.
                 if ($choiceValue === '' && $this->mentionsSpecificDay($text)) {
                     return $this->showSlotList($state, $text);
+                }
+
+                // A clock time the patient named ("at 5:00", "5 in the morning",
+                // "6:30"). It is held only when that exact time is free; otherwise
+                // the patient is told and offered what is really free, never moved
+                // to another time or to the other half of the day.
+                if ($choiceValue === '' && ($timed = $this->resolveTimeRequest($state, $text, $client)) !== null) {
+                    return $timed;
                 }
 
                 // "book for 11" is not a position in the list. If 11:00 is not
@@ -4527,6 +4561,215 @@ class ChatController extends Controller
         }
 
         return 'I don\'t have ' . $clock . ' free on ' . $state['slot_date'] . '. Here are the times I do have.';
+    }
+
+    /**
+     * A clock time the patient named, or null when the message names none.
+     *
+     * "at 5:00", "5 in the morning", "5 AM", "morning 5", "5 pm", "around 6:30",
+     * "um 17 Uhr", "5 Uhr nachmittags", and a bare hour after at / for / around /
+     * about / um. Positions ("the 5th one"), dates and longer numbers are not
+     * times here. The period is whatever the patient said - morning words mean
+     * am, afternoon and evening words mean pm - and null when they said none.
+     *
+     * @return array{h: int, m: int, period: ?string, minutes: bool, zero: bool}|null
+     */
+    private function parseTimeRequest(string $text): ?array
+    {
+        $value = mb_strtolower(trim($text));
+
+        if ($value === '' || $this->saysPosition($text)) {
+            return null;
+        }
+
+        $am = preg_match('/\d\s*a\.?\s?m\.?(?![\p{L}])/u', $value) === 1
+            || preg_match('/\b(?:morning|morgens|vormittags?|früh|fruh)\b/u', $value) === 1;
+        $pm = preg_match('/\d\s*p\.?\s?m\.?(?![\p{L}])/u', $value) === 1
+            || preg_match('/\b(?:afternoon|evening|nachmittags?|abends?)\b/u', $value) === 1;
+
+        if ($am && $pm) {
+            return null;
+        }
+
+        $period = $am ? 'am' : ($pm ? 'pm' : null);
+
+        if (preg_match('/(?<!\d)(\d{1,2})\s*[:.]\s*(\d{2})(?!\d)/u', $value, $x)) {
+            $hour = (int) $x[1];
+            $minute = (int) $x[2];
+            $minutes = true;
+            $zero = strlen($x[1]) === 2 && $x[1][0] === '0';
+        } else {
+            if (preg_match_all('/(?<!\d)(\d{1,2})(?!\d)/u', $value, $all) !== 1 || count($all[1]) !== 1) {
+                return null;
+            }
+
+            $hour = (int) $all[1][0];
+            $minute = 0;
+            $minutes = false;
+            $zero = strlen($all[1][0]) === 2 && $all[1][0][0] === '0';
+
+            $namesATime = $period !== null
+                || preg_match('/\b(?:at|for|around|about|by|from|near|um|gegen)\s+0?' . $hour . '\b/u', $value) === 1
+                || preg_match('/\b(?:o clock|o\'clock|oclock|uhr)\b/u', $value) === 1
+                || preg_match('/^\s*\d{1,2}\s*$/u', $value) === 1;
+
+            if (!$namesATime) {
+                return null;
+            }
+        }
+
+        if ($hour > 23 || $minute > 59) {
+            return null;
+        }
+
+        return ['h' => $hour, 'm' => $minute, 'period' => $period, 'minutes' => $minutes, 'zero' => $zero];
+    }
+
+    /**
+     * Settle a named clock time against the day's real slots.
+     *
+     * - The exact time is free: it is held, as any chosen time is.
+     * - It is not free: say so, and offer the closest times that really are
+     *   free (within three hours); with none that close, ask about another date.
+     * - Only an hour with no period, where morning and afternoon are both
+     *   possible, is asked about: "Do you mean 5:00 in the morning or 5:00 in
+     *   the afternoon?" Nothing is guessed, and no other time is substituted.
+     *
+     * Nothing here picks a time for the patient: the offered times are chips to
+     * choose from, and a chosen time still goes through the confirmation.
+     *
+     * @return array<int, array>|null  null when the message is not a time request
+     */
+    private function resolveTimeRequest(array &$state, string $text, PureMedApiClient $client): ?array
+    {
+        $date = $state['slot_date'] ?? null;
+        $onDate = $this->slotsOn($state['slots'] ?? [], $date);
+
+        $pending = $state['time_ambiguous'] ?? null;
+        $state['time_ambiguous'] = null;
+
+        if (!$onDate) {
+            return null;
+        }
+
+        $request = null;
+
+        // The answer to "morning or afternoon?".
+        if (is_array($pending)) {
+            $value = mb_strtolower($text);
+            $am = preg_match('/\b(?:morning|morgens|vormittags?|früh|fruh|am|a\.m\.)\b/u', $value) === 1;
+            $pm = preg_match('/\b(?:afternoon|evening|nachmittags?|abends?|pm|p\.m\.)\b/u', $value) === 1;
+
+            if ($am !== $pm) {
+                $request = ['h' => (int) $pending['h'], 'm' => (int) $pending['m'], 'period' => $am ? 'am' : 'pm',
+                    'minutes' => (bool) $pending['minutes'], 'zero' => false];
+            }
+        }
+
+        $request ??= $this->parseTimeRequest($text);
+
+        if ($request === null) {
+            return null;
+        }
+
+        $hours = [];
+
+        foreach ($onDate as $slot) {
+            $normalised = $this->normalizeTime($slot['time']);
+
+            if ($normalised !== '') {
+                $hours[(int) substr($normalised, 0, 2)] = true;
+            }
+        }
+
+        $hasMorning = (bool) array_filter(array_keys($hours), fn ($h) => $h < 12);
+        $hasAfternoon = (bool) array_filter(array_keys($hours), fn ($h) => $h >= 12);
+
+        $h = $request['h'];
+
+        if ($h === 0 || $h >= 13 || $request['zero']) {
+            $hour24 = $h;
+        } elseif ($request['period'] === 'am') {
+            $hour24 = $h === 12 ? 0 : $h;
+        } elseif ($request['period'] === 'pm') {
+            $hour24 = $h < 12 ? $h + 12 : 12;
+        } elseif ($h === 12) {
+            $hour24 = 12;
+        } else {
+            // 1 to 11 with no period. Only the practice's own day can settle it.
+            $amOffered = isset($hours[$h]);
+            $pmOffered = isset($hours[$h + 12]);
+
+            if ($amOffered && !$pmOffered) {
+                $hour24 = $h;
+            } elseif ($pmOffered && !$amOffered && !$hasMorning) {
+                // A day with nothing before noon: "2" can only be the afternoon.
+                $hour24 = $h + 12;
+            } elseif (!$amOffered && !$pmOffered && !$request['minutes']) {
+                // A bare number matching no time at all: the existing question
+                // (the 5th time in the list, or another time?) is the right one.
+                return null;
+            } elseif (!$amOffered && !$pmOffered) {
+                // Minutes were named, so it is a clock time that is simply not
+                // free: the morning reading, unless the day has no morning.
+                $hour24 = $hasMorning ? $h : $h + 12;
+            } else {
+                $clock = $h . ':' . str_pad((string) $request['m'], 2, '0', STR_PAD_LEFT);
+                $state['time_ambiguous'] = ['h' => $h, 'm' => $request['m'], 'minutes' => $request['minutes']];
+                $state['_handled'] = true;
+                $state['_no_prompt'] = true;
+
+                return [$this->say('Do you mean ' . $clock . ' in the morning or ' . $clock . ' in the afternoon?')];
+            }
+        }
+
+        $wanted = str_pad((string) $hour24, 2, '0', STR_PAD_LEFT) . str_pad((string) $request['m'], 2, '0', STR_PAD_LEFT);
+
+        foreach ($onDate as $slot) {
+            if ($this->normalizeTime($slot['time']) === $wanted) {
+                return $this->holdSlot($state, $slot, $client);
+            }
+        }
+
+        // Not free. The closest times that really are, within three hours.
+        $target = $hour24 * 60 + $request['m'];
+        $near = [];
+
+        foreach ($onDate as $slot) {
+            $normalised = $this->normalizeTime($slot['time']);
+
+            if ($normalised === '') {
+                continue;
+            }
+
+            $distance = abs((int) substr($normalised, 0, 2) * 60 + (int) substr($normalised, 2, 2) - $target);
+
+            if ($distance <= 180) {
+                $near[] = ['distance' => $distance, 'time' => $normalised, 'label' => $slot['time']];
+            }
+        }
+
+        usort($near, fn ($a, $b) => [$a['distance'], $a['time']] <=> [$b['distance'], $b['time']]);
+        $near = array_slice($near, 0, 2);
+        usort($near, fn ($a, $b) => $a['time'] <=> $b['time']);
+
+        $label = substr($wanted, 0, 2) . ':' . substr($wanted, 2, 2);
+        $state['_handled'] = true;
+        $state['_no_prompt'] = true;
+
+        if (!$near) {
+            $state['offer_other_date'] = true;
+
+            return [$this->say("I don't have " . $label . ' available on ' . $date . ', and there is nothing close to that time. Would you like to try another date?')];
+        }
+
+        $names = array_column($near, 'label');
+
+        return [$this->say("I don't have {$label} available on {$date}. "
+            . (count($names) === 1
+                ? "The closest available time is {$names[0]}."
+                : "The closest available times are {$names[0]} and {$names[1]}.")
+            . ' Which time suits you?')];
     }
 
     /**

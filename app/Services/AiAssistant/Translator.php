@@ -322,6 +322,14 @@ class Translator
                 => fn ($m) => "Ich habe {$m[1]}, " . ($m[2] === 'male' ? 'männlich' : 'weiblich') . ", {$m[3]}. Stimmt das?",
             "/^You can't book an appointment on a past date \((\d{2}\.\d{2}\.\d{4})\)\. Please pick one of the days I have free\.$/su"
                 => fn ($m) => "Sie können keinen Termin an einem vergangenen Datum ({$m[1]}) buchen. Bitte wählen Sie einen der freien Tage.",
+            "/^I don't have (\d{2}:\d{2}) available on (\d{2}\.\d{2}\.\d{4})\. The closest available times are (\d{2}:\d{2}) and (\d{2}:\d{2})\. Which time suits you\?$/su"
+                => fn ($m) => "Um {$m[1]} Uhr habe ich am {$m[2]} leider nichts frei. Die nächsten freien Zeiten sind {$m[3]} Uhr und {$m[4]} Uhr. Welche Zeit passt Ihnen?",
+            "/^I don't have (\d{2}:\d{2}) available on (\d{2}\.\d{2}\.\d{4})\. The closest available time is (\d{2}:\d{2})\. Which time suits you\?$/su"
+                => fn ($m) => "Um {$m[1]} Uhr habe ich am {$m[2]} leider nichts frei. Die nächste freie Zeit ist {$m[3]} Uhr. Welche Zeit passt Ihnen?",
+            "/^I don't have (\d{2}:\d{2}) available on (\d{2}\.\d{2}\.\d{4}), and there is nothing close to that time\. Would you like to try another date\?$/su"
+                => fn ($m) => "Um {$m[1]} Uhr habe ich am {$m[2]} leider nichts frei, und auch nichts in der Nähe. Möchten Sie ein anderes Datum versuchen?",
+            '/^Do you mean (\d{1,2}:\d{2}) in the morning or (\d{1,2}:\d{2}) in the afternoon\?$/su'
+                => fn ($m) => "Meinen Sie {$m[1]} Uhr morgens oder {$m[2]} Uhr nachmittags?",
             '/^I heard (.+) - is that right\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – ist das richtig?",
             "/^I'll send the confirmation to (.+)\\.$/su" => fn ($m) => "Ich schicke die Bestätigung an {$m[1]}.",
             '/^Thanks (.+), you\'re all set\.$/su' => fn ($m) => "Danke {$m[1]}, alles ist eingerichtet.",

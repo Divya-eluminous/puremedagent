@@ -655,11 +655,21 @@
 
         // "um 14:30 Uhr" already carries the word, so it is consumed here and
         // spokenTime() puts it back once.
-        return text.replace(/\b(\d{1,2}):(\d{2})\b(\s*Uhr\b)?/g, function (whole, hour, minute) {
+        return text.replace(/\b(\d{1,2}):(\d{2})\b(\s*Uhr\b)?/g, function (whole, hour, minute, uhr, offset, all) {
             var h = parseInt(hour, 10);
             var m = parseInt(minute, 10);
 
             if (h > 23 || m > 59) { return whole; }
+
+            // "5:00 in the morning" already says the period: speaking
+            // "5 in the morning" in front of it would say it twice, and say
+            // the wrong one in front of "in the afternoon".
+            if (LANG !== 'de' && h >= 1
+                && /^\s*(?:in the (?:morning|afternoon|evening)|a\.?m\.?|p\.?m\.?)(?![a-z])/i.test(all.slice(offset + whole.length))) {
+                var h12 = h % 12 === 0 ? 12 : h % 12;
+
+                return m > 0 ? h12 + (m < 10 ? ' oh ' + m : ' ' + m) : String(h12);
+            }
 
             return spokenTime(h, m);
         });
