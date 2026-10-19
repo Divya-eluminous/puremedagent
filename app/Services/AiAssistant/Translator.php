@@ -134,6 +134,16 @@ class Translator
         'And what mobile number can the practice reach you on?' => 'Und unter welcher Mobilnummer kann die Praxis Sie erreichen?',
         'And your date of birth?' => 'Und Ihr Geburtsdatum?',
         "What's the best email address for your confirmation?" => 'Welche E-Mail-Adresse ist die beste für Ihre Bestätigung?',
+        'May I have your full name, your gender and the best email address for your confirmation?' => 'Darf ich Ihren vollständigen Namen, Ihr Geschlecht und die beste E-Mail-Adresse für Ihre Bestätigung haben?',
+        "I couldn't read a name in that. Could you tell me your full name and your email address again?" => 'Ich konnte darin keinen Namen erkennen. Könnten Sie mir bitte Ihren vollständigen Namen und Ihre E-Mail-Adresse noch einmal nennen?',
+        "I couldn't find an email address in that. Please tell me your full name and your email address, for example: Anna Meier, anna@example.com." => 'Ich konnte darin keine E-Mail-Adresse finden. Bitte nennen Sie mir Ihren vollständigen Namen und Ihre E-Mail-Adresse, zum Beispiel: Anna Meier, anna@example.com.',
+        'Change something' => 'Etwas ändern',
+        'Of course. Tell me what to change - your full name, your gender or your email address (please type the email).' => 'Gerne. Sagen Sie mir, was ich ändern soll – Ihren vollständigen Namen, Ihr Geschlecht oder Ihre E-Mail-Adresse (bitte die E-Mail-Adresse tippen).',
+        'Please tap "Yes, that\'s right" or "Change something".' => 'Bitte tippen Sie auf „Ja, das stimmt“ oder „Etwas ändern“.',
+        "I couldn't find a name, gender or email address in that. Please tell me what to change - for example: Anna Meier, female, anna@example.com." => 'Ich konnte darin weder Namen, Geschlecht noch E-Mail-Adresse finden. Bitte sagen Sie mir, was ich ändern soll – zum Beispiel: Anna Meier, weiblich, anna@example.com.',
+        "That doesn't look like a valid email address. Please type it in." => 'Das sieht nicht nach einer gültigen E-Mail-Adresse aus. Bitte tippen Sie sie ein.',
+        "I couldn't read a name in that. Could you tell me your full name again?" => 'Ich konnte darin keinen Namen erkennen. Könnten Sie mir bitte Ihren vollständigen Namen noch einmal nennen?',
+        'Please give me your first and last name.' => 'Bitte nennen Sie mir Ihren Vor- und Nachnamen.',
         'Last one - are you male or female?' => 'Zum Schluss – sind Sie männlich oder weiblich?',
 
         // Doctor, type, day, time
@@ -308,6 +318,8 @@ class Translator
             '/^I only caught part of that - I heard (.+)\. Could you say the whole address again, spell it out, or type it in\?$/su'
                 => fn ($m) => "Ich habe nur einen Teil verstanden – ich habe {$m[1]} gehört. Können Sie die ganze Adresse noch einmal sagen, buchstabieren oder eintippen?",
             '/^I heard (.+) - did you mean (.+)\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – meinten Sie {$m[2]}?",
+            '/^So I have (.+), (male|female), (.+)\. Is that right\?$/su'
+                => fn ($m) => "Ich habe {$m[1]}, " . ($m[2] === 'male' ? 'männlich' : 'weiblich') . ", {$m[3]}. Stimmt das?",
             '/^I heard (.+) - is that right\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – ist das richtig?",
             "/^I'll send the confirmation to (.+)\\.$/su" => fn ($m) => "Ich schicke die Bestätigung an {$m[1]}.",
             '/^Thanks (.+), you\'re all set\.$/su' => fn ($m) => "Danke {$m[1]}, alles ist eingerichtet.",

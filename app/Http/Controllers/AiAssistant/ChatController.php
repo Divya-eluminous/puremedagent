@@ -233,6 +233,11 @@ class ChatController extends Controller
             $choiceValue = '';
         }
 
+        // And the read-back before registration: its buttons are only read there.
+        if ($choiceValue !== '' && (($state['step'] === 'details_confirm') !== ($choiceType === 'details_confirm'))) {
+            $choiceValue = '';
+        }
+
         // The same for the services tick list: its submission means something
         // only on the services step, and nothing else is read as ticks there.
         foreach (['services', 'country'] as $chipStep) {
@@ -1075,7 +1080,7 @@ class ChatController extends Controller
         if ($choiceValue === ''
             && empty($state['patient_id'])
             && !empty($state['patient']['mobile_no'])
-            && in_array($state['step'], ['country', 'email', 'email_confirm', 'otp_verify', 'first_name', 'last_name', 'gender'], true)
+            && in_array($state['step'], ['country', 'email', 'email_confirm', 'otp_verify', 'first_name', 'last_name', 'gender', 'details_confirm', 'details_edit'], true)
             && $this->wantsToChangePhone($text)) {
             return $this->restartWithNewNumber($state);
         }
@@ -1401,6 +1406,42 @@ class ChatController extends Controller
                 return $this->identifyPatient($state, $client, $authenticator, $otp);
 
             case 'email':
+                // The answer may carry the name as well as the address. They are
+                // split, and each goes through the validator it always had; an
+                // answer whose name cannot be read changes nothing and asks again.
+                $combined = $this->splitNameEmail($text);
+
+                if ($combined['name_text'] !== null) {
+                    // Gender may be said with the name ("Anna Meier, female");
+                    // it is taken out first so it is never read as part of it.
+                    $withGender = $this->splitGenderFromName($combined['name_text']);
+                    $name = $this->splitName((string) $withGender['name']);
+
+                    if (!$name['first'] && $withGender['gender'] !== null && $withGender['name'] === null) {
+                        // Only a gender was given with the address: keep it, ask the name later.
+                        $state['patient']['gender'] = $withGender['gender'];
+                        $name = ['first' => null, 'last' => null];
+                    } elseif (!$name['first']) {
+                        return [$this->say("I couldn't read a name in that. Could you tell me your full name and your email address again?")];
+                    } elseif ($withGender['gender'] !== null) {
+                        $state['patient']['gender'] = $withGender['gender'];
+                    }
+
+                    if ($name['first']) {
+                        $state['patient']['first_name'] = $name['first'];
+                    }
+
+                    if ($name['last']) {
+                        $state['patient']['last_name'] = $name['last'];
+                    }
+
+                }
+
+                // A typed address is taken as it is, whatever was said around it.
+                if ($combined['email'] !== null) {
+                    $text = $combined['email'];
+                }
+
                 $capture = $this->captureEmail($text);
 
                 Log::info('AI assistant email capture', [
@@ -1414,6 +1455,12 @@ class ChatController extends Controller
                 ]);
 
                 if (!$capture['valid']) {
+                    // Asked for the name too, so a reply without an address says
+                    // what is still needed rather than only blaming the email.
+                    if (empty($state['patient']['last_name']) && empty($state['patient']['first_name'])) {
+                        return [$this->say("I couldn't find an email address in that. Please tell me your full name and your email address, for example: Anna Meier, anna@example.com.")];
+                    }
+
                     return [$this->say("Hmm, that doesn't look like a valid email address. Could you repeat it, spell it out, or type it in?")];
                 }
 
@@ -1523,7 +1570,20 @@ class ChatController extends Controller
                         return $this->finishReturningLogin($state, $client, $authenticator);
                     }
 
-                    $state['step'] = 'first_name';
+                    // Name and email may have been given together before the
+                    // code, so only what is still missing is asked.
+                    $state['step'] = empty($state['patient']['first_name'])
+                        ? 'first_name'
+                        : (empty($state['patient']['last_name']) ? 'last_name' : 'gender');
+
+                    // Everything was given up front: nothing is left to ask, and
+                    // the code has just been read back, so the patient is set up.
+                    if ($state['step'] === 'gender' && !empty($state['patient']['gender'])) {
+                        return array_merge(
+                            [$this->say('Thank you - that is verified.')],
+                            $this->askDetailsConfirm($state, $client, $authenticator)
+                        );
+                    }
 
                     return [$this->say('Thank you - that is verified.')];
                 }
@@ -1543,6 +1603,30 @@ class ChatController extends Controller
 
                 return [$this->say("That code is not right. Could you check it and read it to me again?", 'error')];
 
+            case 'details_confirm':
+                // The last look before the patient exists. Nothing is created
+                // until a clear yes, and then only through the same gate as
+                // ever: registerAndLoadDoctors() refuses an unverified patient.
+                if ($choiceValue === 'edit' || $this->saidNo($choiceValue, $text)) {
+                    $state['step'] = 'details_edit';
+
+                    return [];
+                }
+
+                if ($this->saidYes($choiceValue, $text)) {
+                    return $this->registerAndLoadDoctors($state, $client, $authenticator);
+                }
+
+                // Neither yes nor no: it may be the correction itself.
+                $edit = $this->applyDetailsEdit($choiceValue === '' ? $text : '', $state, true);
+
+                return $edit ?? [$this->say('Please tap "Yes, that\'s right" or "Change something".')];
+
+            case 'details_edit':
+                $edit = $this->applyDetailsEdit($text, $state);
+
+                return $edit ?? [$this->say("I couldn't find a name, gender or email address in that. Please tell me what to change - for example: Anna Meier, female, anna@example.com.")];
+
             case 'gender':
                 $gender = $this->normalizeGender($choiceValue !== '' ? $choiceValue : $text);
                 if (!$gender) {
@@ -1550,7 +1634,7 @@ class ChatController extends Controller
                 }
                 $state['patient']['gender'] = $gender;
 
-                return $this->registerAndLoadDoctors($state, $client, $authenticator);
+                return $this->askDetailsConfirm($state, $client, $authenticator);
 
             case 'doctor':
                 // Questions about who else is available are answered further
@@ -2110,7 +2194,11 @@ class ChatController extends Controller
                 return ['text' => 'And your date of birth?', 'input' => $this->input()];
 
             case 'email':
-                return ['text' => "What's the best email address for your confirmation?", 'input' => $this->input()];
+                // Name and email are asked together; once both names are known
+                // (or an earlier answer gave them) it is the email alone.
+                return ['text' => empty($patient['last_name'])
+                    ? 'May I have your full name, your gender and the best email address for your confirmation?'
+                    : "What's the best email address for your confirmation?", 'input' => $this->input()];
 
             case 'email_confirm':
                 return [
@@ -2137,6 +2225,24 @@ class ChatController extends Controller
             case 'otp_failed':
                 return [
                     'text' => 'Please call the practice and they will book this for you.',
+                    'input' => $this->input(),
+                ];
+
+            case 'details_confirm':
+                return [
+                    'text' => 'So I have ' . trim(($patient['first_name'] ?? '') . ' ' . ($patient['last_name'] ?? ''))
+                        . ', ' . (($patient['gender'] ?? '') === 'M' ? 'male' : 'female')
+                        . ', ' . ($patient['email'] ?? '') . '. Is that right?',
+                    'options' => $this->options('details_confirm', [
+                        ['value' => 'yes', 'title' => "Yes, that's right"],
+                        ['value' => 'edit', 'title' => 'Change something'],
+                    ]),
+                    'input' => $this->input(),
+                ];
+
+            case 'details_edit':
+                return [
+                    'text' => 'Of course. Tell me what to change - your full name, your gender or your email address (please type the email).',
                     'input' => $this->input(),
                 ];
 
@@ -6488,6 +6594,184 @@ class ChatController extends Controller
     }
 
     /**
+     * Split "Anna Meier, anna@example.com" into the words that may be a name and
+     * the address. Only a typed address (it contains an @) is split off; a spoken
+     * one ("anna at example dot com") is left whole for the email capture, as
+     * before. Nothing here judges either half - cleanName() and captureEmail()
+     * still do.
+     *
+     * @return array{name_text: ?string, email: ?string}
+     */
+    private function splitNameEmail(string $text): array
+    {
+        $none = ['name_text' => null, 'email' => null];
+
+        if (!preg_match('/[^\s,;<>()]+@[^\s,;<>()]+\.[^\s,;<>()]+/u', $text, $m, PREG_OFFSET_CAPTURE)) {
+            return $none;
+        }
+
+        $email = rtrim($m[0][0], '.');
+        $rest = substr($text, 0, $m[0][1]) . ' ' . substr($text, $m[0][1] + strlen($m[0][0]));
+
+        // The words that introduce the address are not part of the name.
+        $lead = '(?:(?:and|und)\s+)?(?:(?:my|the|meine|mein|die)\s+)?(?:e-?mail(?:[\s-]+address)?|e-?mail-adresse|adresse)(?:\s+(?:is|ist))?';
+        $rest = preg_replace('/[\s,;:\-]*' . $lead . '[\s,;:\-]*$/iu', ' ', $rest);
+        $rest = preg_replace('/^[\s,;:\-]*' . $lead . '[\s,;:\-]*/iu', ' ', $rest);
+        $rest = trim(preg_replace('/\s+/u', ' ', $rest), " 	.,;:-");
+
+        // "it's anna@example.com" or "here is anna@example.com" leave only
+        // words that introduce the address, which are not a name either.
+        $filler = ['it', "it's", 'its', 'is', 'here', "here's", 'this', "this's", 'that', "that's", 'my', 'the', 'and',
+            'und', 'ist', 'das', 'hier', 'meine', 'mein', 'die', 'e-mail', 'email', 'mail', 'address', 'adresse'];
+        $words = preg_split('/\s+/u', mb_strtolower($rest), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+        if ($words === [] || array_diff($words, $filler) === []) {
+            $rest = '';
+        }
+
+        return ['name_text' => $rest === '' ? null : $rest, 'email' => $email];
+    }
+
+    /**
+     * Before the patient is created: read the details back, unless the
+     * practice switched that off. Reached only once the code has been read
+     * back; a caller forcing the step gets the code question instead.
+     */
+    private function askDetailsConfirm(array &$state, PureMedApiClient $client, PatientAuthenticator $authenticator): array
+    {
+        if (!$this->verifiedForRegistration($state)) {
+            $state['step'] = 'otp_verify';
+
+            return [$this->say('Before I set you up, please read me the four digit code I sent you.', 'error')];
+        }
+
+        if (!config('ai-assistant.confirm_details', true)) {
+            return $this->registerAndLoadDoctors($state, $client, $authenticator);
+        }
+
+        $state['step'] = 'details_confirm';
+
+        return [];
+    }
+
+    /**
+     * Apply a correction to the details given so far: a full name, a gender, an
+     * email address, or any of them together. Each goes through the validator
+     * it always had.
+     *
+     * @param  bool  $strict  true when the text was not asked for as a correction, so a lone word is not taken for a name
+     * @return array<int, array>|null  replies (empty when applied, a message when refused), or null when the
+     *                                 text held nothing that could be a name, a gender or an address
+     */
+    private function applyDetailsEdit(string $text, array &$state, bool $strict = false): ?array
+    {
+        $text = trim($text);
+
+        if ($text === '') {
+            return null;
+        }
+
+        $combined = $this->splitNameEmail($text);
+        $rest = $combined['email'] !== null ? $combined['name_text'] : $text;
+        $changes = [];
+
+        if ($combined['email'] !== null) {
+            $capture = $this->captureEmail($combined['email']);
+
+            if (!$capture['valid'] || $capture['confidence'] < 0.5 || $capture['suggestion'] !== null) {
+                return [$this->say("That doesn't look like a valid email address. Please type it in.")];
+            }
+
+            $changes['email'] = $capture['email'];
+        }
+
+        if ($rest !== null && $rest !== '') {
+            $found = $this->splitGenderFromName($rest);
+
+            if ($found['gender'] !== null) {
+                $changes['gender'] = $found['gender'];
+            }
+
+            if ($found['name'] !== null) {
+                $parts = $this->splitName($found['name']);
+
+                if (!$parts['first']) {
+                    return [$this->say("I couldn't read a name in that. Could you tell me your full name again?")];
+                }
+
+                if (!$parts['last']) {
+                    // Typed at the read-back, a single word is more likely "perhaps" than a name.
+                    return $strict ? null : [$this->say('Please give me your first and last name.')];
+                }
+
+                $changes['first_name'] = $parts['first'];
+                $changes['last_name'] = $parts['last'];
+            }
+        }
+
+        if (!$changes) {
+            return null;
+        }
+
+        foreach ($changes as $field => $value) {
+            $state['patient'][$field] = $value;
+        }
+
+        $state['step'] = 'details_confirm';
+
+        return [];
+    }
+
+    /**
+     * Take a gender out of the words that may be a name.
+     *
+     * Only when it stands apart: its own item ("Anna Meier, female", "female;
+     * Anna Meier") or, with a name before it, one of the words that cannot be a
+     * name ("Anna Meier female"). "Thomas Mann" and "Frau" inside a name are
+     * left alone, and the speech-recogniser's "mail" for "male" is never taken.
+     *
+     * @return array{name: ?string, gender: ?string}
+     */
+    private function splitGenderFromName(string $text): array
+    {
+        $gender = null;
+        $kept = [];
+
+        // Two of them ("male female") is a muddle, not an answer: nothing is
+        // taken, so the whole answer is asked for again.
+        if (preg_match_all('/\b(?:male|female|weiblich|m(?:ä|ae)nnlich)\b/iu', $text) > 1) {
+            return ['name' => null, 'gender' => null];
+        }
+
+        foreach (preg_split('/\s*[,;]\s*|\s+[-–]\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $segment) {
+            $bare = preg_replace('/^(?:(?:gender|sex|geschlecht)\s*[:=]?\s*)?(?:(?:i\s*am|i\'m|ich\s+bin)\s+)?/iu', '', trim($segment));
+
+            if ($gender === null && preg_match('/^(male|female|man|woman|weiblich|m(?:ä|ae)nnlich|frau|mann|m|w|f)\.?$/iu', $bare) === 1) {
+                $gender = $this->normalizeGender($bare);
+
+                if ($gender !== null) {
+                    continue;
+                }
+            }
+
+            $kept[] = $segment;
+        }
+
+        $name = trim(implode(' ', $kept));
+
+        // "Anna Meier female": a word that cannot be part of a name, after one that can.
+        if ($gender === null && preg_match('/^(.+?)\s+(male|female|weiblich|m(?:ä|ae)nnlich)\.?$/iu', $name, $m) === 1) {
+            $gender = $this->normalizeGender($m[2]);
+
+            if ($gender !== null) {
+                $name = trim($m[1]);
+            }
+        }
+
+        return ['name' => $name === '' ? null : $name, 'gender' => $gender];
+    }
+
+    /**
      * What the assistant says when an answer is not a name.
      *
      * Repeating the request mid-registration is common. Saying "I didn't catch
@@ -7313,6 +7597,7 @@ class ChatController extends Controller
         return match ($step) {
             'birth_date' => ['Just checking our records...'],
             'gender' => ['Registering your details...', 'Finding available doctors...'],
+            'details_confirm' => ['Registering your details...', 'Finding available doctors...'],
             'doctor' => ['Loading appointment types...'],
             'appointment_type' => ['Loading the services...'],
             'services' => ['Checking available slots...'],

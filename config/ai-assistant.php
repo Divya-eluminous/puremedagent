@@ -123,6 +123,10 @@ return [
     // null = a folder called sessions-assistant beside the normal session folder (wherever that is,
     // including shared storage). It must be writable by the web server's user.
     'session_path' => env('AI_ASSISTANT_SESSION_PATH'),
+    // A new patient's name, gender and email are read back ("So I have ... Is that right?", with Yes and
+    // Change something) before the patient is created in PureMed. false = ROLLBACK: created straight
+    // after the gender answer, as before. The 4-digit code is required either way.
+    'confirm_details' => (bool) env('AI_ASSISTANT_CONFIRM_DETAILS', true),
     // An answer that names one option exactly ("Dr Anna Patel", "the second one", "die zweite")
     // is read by the rules without asking an AI, when the rules provably pick the same option.
     // false = ROLLBACK: every free-text answer on those steps goes to the AI first, as before.
