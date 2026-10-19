@@ -320,6 +320,8 @@ class Translator
             '/^I heard (.+) - did you mean (.+)\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – meinten Sie {$m[2]}?",
             '/^So I have (.+), (male|female), (.+)\. Is that right\?$/su'
                 => fn ($m) => "Ich habe {$m[1]}, " . ($m[2] === 'male' ? 'männlich' : 'weiblich') . ", {$m[3]}. Stimmt das?",
+            "/^You can't book an appointment on a past date \((\d{2}\.\d{2}\.\d{4})\)\. Please pick one of the days I have free\.$/su"
+                => fn ($m) => "Sie können keinen Termin an einem vergangenen Datum ({$m[1]}) buchen. Bitte wählen Sie einen der freien Tage.",
             '/^I heard (.+) - is that right\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – ist das richtig?",
             "/^I'll send the confirmation to (.+)\\.$/su" => fn ($m) => "Ich schicke die Bestätigung an {$m[1]}.",
             '/^Thanks (.+), you\'re all set\.$/su' => fn ($m) => "Danke {$m[1]}, alles ist eingerichtet.",

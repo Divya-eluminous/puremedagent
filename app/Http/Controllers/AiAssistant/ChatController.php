@@ -1720,6 +1720,18 @@ class ChatController extends Controller
                     return $this->showSlotList($state, $text);
                 }
 
+                // A day that has already gone cannot be booked, and saying "nothing
+                // free that day" would suggest it might have been. Only for a day
+                // that is NOT on the list: whatever PureMed offers is chosen
+                // exactly as before, so this is a message, not a rule that
+                // changes what can be booked.
+                if ($choiceValue === '' && ($passed = $this->pastDayNamed($text))
+                    && !in_array($passed->format('d.m.Y'), $this->availableDates($state['slots']), true)) {
+                    $state['_handled'] = true;
+
+                    return [$this->say($this->passedDayMessage($passed))];
+                }
+
                 $date = $this->matchSlotDate($state['slots'], $choiceValue, $text);
                 if (!$date) {
                     // Naming a specific day that is not on the list means it is
@@ -2581,6 +2593,8 @@ class ChatController extends Controller
                         return array_merge($replies, $this->holdSlot($state, $slot, $client));
                     }
                 }
+            } elseif ($passed = $this->pastDayNamed($hint)) {
+                $replies[] = $this->say($this->passedDayMessage($passed));
             } elseif ($this->mentionsSpecificDay($hint)) {
                 // They asked for a day this doctor does not offer. Say so
                 // rather than quietly showing a different one.
@@ -3088,7 +3102,8 @@ class ChatController extends Controller
      */
     private function slotHint(string $text): ?string
     {
-        if ($this->mentionsSpecificDay($text) || $this->extractTime($text) !== '') {
+        // A past day is remembered too ('book 10 oct'), so it can be answered once there is a day list.
+        if ($this->mentionsSpecificDay($text) || $this->extractTime($text) !== '' || $this->pastDayNamed($text) !== null) {
             return $text;
         }
 
@@ -5063,6 +5078,94 @@ class ChatController extends Controller
      * Used to tell "20 August" (a day that may not be offered) apart from
      * "morning" (a preference that can be satisfied on any day).
      */
+    /** What the patient is told when the day they named is already behind us. */
+    private function passedDayMessage(Carbon $day): string
+    {
+        return "You can't book an appointment on a past date (" . $day->format('d.m.Y') . '). Please pick one of the days I have free.';
+    }
+
+    /**
+     * The day the patient named, when that day is before today - otherwise null.
+     *
+     * "10 Oct", "10.10.2026", "2026-10-10", "yesterday", "last Monday" and the
+     * German "10. Oktober", "gestern", "letzten Montag". A date without a year
+     * only counts as past when it is within the last two months: "5 January"
+     * said in October means the coming one, which is not for this to judge.
+     * "10.10" alone is left out, because that is how a time is written here.
+     */
+    private function pastDayNamed(string $text): ?Carbon
+    {
+        $raw = mb_strtolower($text);
+        $today = Carbon::today();
+
+        if (preg_match('/\b(day before yesterday|vorgestern)\b/u', $raw)) {
+            return $today->copy()->subDays(2);
+        }
+
+        if (preg_match('/\b(yesterday|gestern)\b/u', $raw)) {
+            return $today->copy()->subDay();
+        }
+
+        $weekdays = [
+            'monday' => Carbon::MONDAY, 'montag' => Carbon::MONDAY,
+            'tuesday' => Carbon::TUESDAY, 'dienstag' => Carbon::TUESDAY,
+            'wednesday' => Carbon::WEDNESDAY, 'mittwoch' => Carbon::WEDNESDAY,
+            'thursday' => Carbon::THURSDAY, 'donnerstag' => Carbon::THURSDAY,
+            'friday' => Carbon::FRIDAY, 'freitag' => Carbon::FRIDAY,
+            'saturday' => Carbon::SATURDAY, 'samstag' => Carbon::SATURDAY,
+            'sunday' => Carbon::SUNDAY, 'sonntag' => Carbon::SUNDAY,
+        ];
+
+        foreach ($weekdays as $name => $day) {
+            if (preg_match('/\b(?:last|previous|letzten?|vergangenen?|vorigen?)\s+' . $name . '\b/u', $raw)) {
+                return $today->copy()->previous($day);
+            }
+        }
+
+        $past = static fn (?Carbon $date): ?Carbon => $date && $date->lt(Carbon::today()) ? $date : null;
+        $make = static function (int $year, int $month, int $day): ?Carbon {
+            return checkdate($month, $day, $year) ? Carbon::create($year, $month, $day)->startOfDay() : null;
+        };
+
+        if (preg_match('/\b(\d{4})-(\d{2})-(\d{2})\b/', $raw, $m)) {
+            return $past($make((int) $m[1], (int) $m[2], (int) $m[3]));
+        }
+
+        if (preg_match('/\b(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})\b/', $raw, $m)) {
+            return $past($make((int) $m[3], (int) $m[2], (int) $m[1]));
+        }
+
+        $months = [
+            'january' => 1, 'jan' => 1, 'januar' => 1, 'february' => 2, 'feb' => 2, 'februar' => 2,
+            'march' => 3, 'mar' => 3, 'märz' => 3, 'maerz' => 3, 'mär' => 3, 'april' => 4, 'apr' => 4,
+            'may' => 5, 'mai' => 5, 'june' => 6, 'jun' => 6, 'juni' => 6, 'july' => 7, 'jul' => 7, 'juli' => 7,
+            'august' => 8, 'aug' => 8, 'september' => 9, 'sep' => 9, 'sept' => 9,
+            'october' => 10, 'oct' => 10, 'oktober' => 10, 'okt' => 10, 'november' => 11, 'nov' => 11,
+            'december' => 12, 'dec' => 12, 'dezember' => 12, 'dez' => 12,
+        ];
+        $names = implode('|', array_map(fn ($n) => preg_quote($n, '/'), array_keys($months)));
+
+        $day = $month = $year = null;
+
+        if (preg_match('/\b(\d{1,2})(?:st|nd|rd|th)?\.?\s*(?:of\s+)?(' . $names . ')\b\.?(?:,?\s*(\d{4}))?/u', $raw, $m)) {
+            [$day, $month, $year] = [(int) $m[1], $months[$m[2]], isset($m[3]) && $m[3] !== '' ? (int) $m[3] : null];
+        } elseif (preg_match('/\b(' . $names . ')\b\.?\s*(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s*(\d{4}))?/u', $raw, $m)) {
+            [$day, $month, $year] = [(int) $m[2], $months[$m[1]], isset($m[3]) && $m[3] !== '' ? (int) $m[3] : null];
+        }
+
+        if ($day === null) {
+            return null;
+        }
+
+        if ($year !== null) {
+            return $past($make($year, $month, $day));
+        }
+
+        $thisYear = $make((int) $today->year, $month, $day);
+
+        return $thisYear && $thisYear->lt($today) && $thisYear->diffInDays($today) <= 60 ? $thisYear : null;
+    }
+
     private function mentionsSpecificDay(string $text): bool
     {
         $value = $this->normalizeText($text);
@@ -5087,7 +5190,7 @@ class ChatController extends Controller
 
         if (preg_match('/\b\d{1,2}\s*(?:' . $months . ')\b/u', $value) === 1
             || preg_match('/\b(?:' . $months . ')\s*\d{1,2}\b/u', $value) === 1
-            || preg_match('/\b(tomorrow|today|day after tomorrow|tonight|heute|morgen)\b/u', $value) === 1
+            || preg_match('/\b(tomorrow|today|day after tomorrow|tonight|heute|morgen|yesterday|gestern|vorgestern)\b/u', $value) === 1
             || preg_match('/\b(?:' . $weekdays . ')\b/u', $value) === 1) {
             return true;
         }
