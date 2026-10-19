@@ -3786,8 +3786,12 @@ class ChatController extends Controller
         $tokens = array_map(fn ($t) => trim($t, '.,!;:'), $tokens);
 
         if (!empty($state['country_free'])) {
-            if (count($tokens) === 1 && preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $tokens[0])) {
-                return $this->acceptCountry($state, $tokens[0]);
+            // "+91" and "0091", and the way a voice recogniser writes them:
+            // "plus 91", "zero zero 91", "double zero 91", "null null 49".
+            $spokenCode = $this->spokenCountryCode($tokens);
+
+            if ($spokenCode !== null && preg_match('/^(\+|00)[1-9][0-9]{0,3}$/', $spokenCode)) {
+                return $this->acceptCountry($state, $spokenCode);
             }
 
             $state['_handled'] = true;
@@ -3832,6 +3836,33 @@ class ChatController extends Controller
     }
 
     /** Remember the code and the country the register API will accept for it, and move on. */
+    /**
+     * The country code in what the patient said or typed, or null.
+     *
+     * A prefix ("+", "plus", "00", "zero zero", "double zero", "null null")
+     * followed by digits, which may be spoken or spaced out ("plus 4 3", "plus
+     * forty three"). Nothing else counts: the caller still checks the result is
+     * a real-looking code (one to four digits, no leading zero after the prefix).
+     *
+     * @param  array<int, string>  $tokens
+     */
+    private function spokenCountryCode(array $tokens): ?string
+    {
+        $value = implode(' ', $tokens);
+
+        $value = preg_replace('/^(?:pluss|plus)(?![a-z])\s*/u', '+', $value);
+        $value = preg_replace('/^(?:zero zero|double zero|double o|doppel ?null|null null|oh oh)\b\s*/u', '00', $value);
+        $value = $this->wordsToNumbers($value);
+
+        // "0 0 91" is what the number words leave behind for "zero zero 91".
+        // Digits are joined only when spoken one at a time ("4 3"); "0091 12" is two numbers, not a code.
+        if (preg_match('/^(\+|0\s*0)\s*(\d+|\d(?:\s+\d)+)$/u', $value, $m) !== 1) {
+            return null;
+        }
+
+        return (str_contains($m[1], '+') ? '+' : '00') . preg_replace('/\s+/', '', $m[2]);
+    }
+
     private function acceptCountry(array &$state, string $code): array
     {
         $state['patient']['country_code'] = $code;
@@ -6463,6 +6494,13 @@ class ChatController extends Controller
         $spoken = [
             ' at the rate of ' => '@',
             ' at the rate ' => '@',
+            // What the recogniser writes when it mishears "rate".
+            ' at the ready of ' => '@',
+            ' at the ready ' => '@',
+            ' at the rated of ' => '@',
+            ' at the rated ' => '@',
+            ' at the rates of ' => '@',
+            ' at the right of ' => '@',
             ' at rate of ' => '@',
             ' at rate ' => '@',
             ' at sign ' => '@',
@@ -6964,29 +7002,41 @@ class ChatController extends Controller
 
     /**
      * Split "Anna Meier, anna@example.com" into the words that may be a name and
-     * the address. Only a typed address (it contains an @) is split off; a spoken
-     * one ("anna at example dot com") is left whole for the email capture, as
-     * before. Nothing here judges either half - cleanName() and captureEmail()
-     * still do.
+     * the address. A typed address is found with or without spaces round the @
+     * ("anna @ example.com"); a spoken one ("anna at the rate of example dot com")
+     * is found too, and then handed on whole for the email capture to read, as
+     * before. What is left over is the name part, which may still carry words such
+     * as "my full name is" or "I am female"; the callers deal with those.
+     * Nothing here judges either half - cleanName() and captureEmail() still do.
      *
      * @return array{name_text: ?string, email: ?string}
      */
     private function splitNameEmail(string $text): array
     {
         $none = ['name_text' => null, 'email' => null];
+        $spoken = false;
 
-        if (!preg_match('/[^\s,;<>()]+@[^\s,;<>()]+\.[^\s,;<>()]+/u', $text, $m, PREG_OFFSET_CAPTURE)) {
+        if (preg_match('/([^\s,;<>()@]+)\s*@\s*([^\s,;<>()@]+\.[^\s,;<>()@]+)/u', $text, $m, PREG_OFFSET_CAPTURE)) {
+            $email = rtrim($m[1][0] . '@' . $m[2][0], '.');
+        } elseif (preg_match('/([\p{L}\d._-]+)\s+at(?:\s+the\s+(?:rate|ready|rated|rates|right)(?:\s+of)?|\s+rate(?:\s+of)?)?\s+([\p{L}\d-]+(?:\s*(?:dot|period|\.)\s*[\p{L}\d-]+)*?\s*(?:dot|period|\.)\s*\p{L}{2,6})(?![\p{L}\d])/iu', $text, $m, PREG_OFFSET_CAPTURE)) {
+            // Left whole: the capture reads "anna at the rate of x dot com" in a
+            // sentence, and letters spelled one by one ("a n n a at ...") only
+            // make sense with the whole of them.
+            $email = $text;
+            $spoken = true;
+        } else {
             return $none;
         }
 
-        $email = rtrim($m[0][0], '.');
         $rest = substr($text, 0, $m[0][1]) . ' ' . substr($text, $m[0][1] + strlen($m[0][0]));
 
         // The words that introduce the address are not part of the name.
         $lead = '(?:(?:and|und)\s+)?(?:(?:my|the|meine|mein|die)\s+)?(?:e-?mail(?:[\s-]+address)?|e-?mail-adresse|adresse)(?:\s+(?:is|ist))?';
+        $rest = preg_replace('/\b(?:is|ist)\s+(?:(?:my|the|mein|meine|die)\s+)?(?:e-?mail(?:[\s-]+address)?|e-?mail-adresse|adresse)\b/iu', ' ', $rest);
         $rest = preg_replace('/[\s,;:\-]*' . $lead . '[\s,;:\-]*$/iu', ' ', $rest);
         $rest = preg_replace('/^[\s,;:\-]*' . $lead . '[\s,;:\-]*/iu', ' ', $rest);
-        $rest = trim(preg_replace('/\s+/u', ' ', $rest), " 	.,;:-");
+        $rest = preg_replace('/(?:\s+(?:and|und))+\s*$/iu', ' ', $rest);
+        $rest = trim(preg_replace('/\s+/u', ' ', $rest), " \t.,;:-");
 
         // "it's anna@example.com" or "here is anna@example.com" leave only
         // words that introduce the address, which are not a name either.
@@ -6995,6 +7045,12 @@ class ChatController extends Controller
         $words = preg_split('/\s+/u', mb_strtolower($rest), -1, PREG_SPLIT_NO_EMPTY) ?: [];
 
         if ($words === [] || array_diff($words, $filler) === []) {
+            $rest = '';
+        }
+
+        // A spoken address whose letters were said one by one ("p r i t i at ...")
+        // leaves single letters behind: those are the address, never a name.
+        if ($spoken && array_filter($words, fn ($w) => mb_strlen($w) < 2 && !in_array($w, ['i', 'a'], true))) {
             $rest = '';
         }
 
@@ -7112,6 +7168,20 @@ class ChatController extends Controller
             return ['name' => null, 'gender' => null];
         }
 
+        // Said as a phrase inside a sentence: "my gender is female", "gender:
+        // female", "I am female". The phrase is taken out whole.
+        $phrase = '/(?:\b(?:(?:my|mein)\s+)?(?:gender|sex|geschlecht)\s*(?:is|ist|:|=)?\s*|\b(?:i\s*am|i\'m|ich\s+bin)\s+)(male|female|weiblich|m(?:ä|ae)nnlich)\b/iu';
+
+        if (preg_match($phrase, $text, $g)) {
+            $gender = $this->normalizeGender($g[1]);
+
+            if ($gender !== null) {
+                $text = preg_replace($phrase, ' ', $text, 1);
+                $text = preg_replace('/(?:\s+(?:and|und))+\s*$/iu', ' ', preg_replace('/^\s*(?:(?:and|und)\s+)+/iu', ' ', $text));
+                $text = trim(preg_replace('/\s+/u', ' ', $text), " \t.,;:-");
+            }
+        }
+
         foreach (preg_split('/\s*[,;]\s*|\s+[-–]\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $segment) {
             $bare = preg_replace('/^(?:(?:gender|sex|geschlecht)\s*[:=]?\s*)?(?:(?:i\s*am|i\'m|ich\s+bin)\s+)?/iu', '', trim($segment));
 
@@ -7127,6 +7197,9 @@ class ChatController extends Controller
         }
 
         $name = trim(implode(' ', $kept));
+
+        // "Rea Testing is my full name": the name came first, the label after it.
+        $name = trim(preg_replace('/^(.+?)\s+(?:is|ist)\s+(?:my|mein)\s+(?:(?:full|complete|whole|ganzer|vollst\S*)\s+)?(?:name|namen?)\b.*$/iu', '$1', $name));
 
         // "Anna Meier female": a word that cannot be part of a name, after one that can.
         if ($gender === null && preg_match('/^(.+?)\s+(male|female|weiblich|m(?:ä|ae)nnlich)\.?$/iu', $name, $m) === 1) {
