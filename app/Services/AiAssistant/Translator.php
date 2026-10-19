@@ -330,6 +330,7 @@ class Translator
                 => fn ($m) => "Um {$m[1]} Uhr habe ich am {$m[2]} leider nichts frei, und auch nichts in der Nähe. Möchten Sie ein anderes Datum versuchen?",
             '/^Do you mean (\d{1,2}:\d{2}) in the morning or (\d{1,2}:\d{2}) in the afternoon\?$/su'
                 => fn ($m) => "Meinen Sie {$m[1]} Uhr morgens oder {$m[2]} Uhr nachmittags?",
+            '/^Got your name, (.+)\.$/su' => fn ($m) => "Ich habe Ihren Namen, {$m[1]}.",
             '/^I heard (.+) - is that right\?$/su' => fn ($m) => "Ich habe {$m[1]} gehört – ist das richtig?",
             "/^I'll send the confirmation to (.+)\\.$/su" => fn ($m) => "Ich schicke die Bestätigung an {$m[1]}.",
             '/^Thanks (.+), you\'re all set\.$/su' => fn ($m) => "Danke {$m[1]}, alles ist eingerichtet.",

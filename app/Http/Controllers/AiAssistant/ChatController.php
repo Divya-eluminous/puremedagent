@@ -1465,6 +1465,29 @@ class ChatController extends Controller
                 ]);
 
                 if (!$capture['valid']) {
+                    // The patient gave the name and not the address yet: keep the
+                    // name, so it is not asked for a second time, and ask for the
+                    // address alone. Only a full name that is plainly not part of
+                    // a half-heard address ("anna at gmail"), through the same
+                    // name validator as ever; one word, or anything address-like,
+                    // is left to the messages below.
+                    if (empty($state['patient']['last_name']) && $combined['email'] === null
+                        && preg_match('/@|\d|\b(?:at|dot|punkt|underscore|gmail|googlemail|yahoo|hotmail|outlook|yopmail|icloud|gmx|e-?mail|mail|com)\b/iu', $text) !== 1) {
+                        $found = $this->splitGenderFromName($text);
+                        $nameOnly = $found['name'] !== null ? $this->splitName($found['name']) : ['first' => null, 'last' => null];
+
+                        if ($nameOnly['first'] && $nameOnly['last']) {
+                            $state['patient']['first_name'] = $nameOnly['first'];
+                            $state['patient']['last_name'] = $nameOnly['last'];
+
+                            if ($found['gender'] !== null) {
+                                $state['patient']['gender'] = $found['gender'];
+                            }
+
+                            return [$this->say('Got your name, ' . $nameOnly['first'] . ' ' . $nameOnly['last'] . '.')];
+                        }
+                    }
+
                     // Asked for the name too, so a reply without an address says
                     // what is still needed rather than only blaming the email.
                     if (empty($state['patient']['last_name']) && empty($state['patient']['first_name'])) {
