@@ -65,6 +65,20 @@
     }
     .pm-restart:hover { background: #f6f9ff; color: var(--pm-blue); }
 
+    /* The way out of the chat to the practice's own booking form. */
+    .pm-weblink {
+        border: 1px solid var(--pm-line);
+        background: #fff;
+        color: var(--pm-blue);
+        border-radius: 999px;
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+    }
+    .pm-weblink:hover { background: #f6f9ff; }
+
     .pm-lang {
         display: inline-flex;
         border: 1px solid var(--pm-line);
@@ -83,6 +97,11 @@
     }
     .pm-lang button:hover { background: #f6f9ff; }
     .pm-lang button.on { background: #eef4ff; color: var(--pm-blue); }
+    /* The pill clips anything drawn outside it, which cut the browser's focus ring
+       short. The ring is drawn inside the button instead (keyboard only; a click
+       shows the selected state above). */
+    .pm-lang button:focus { outline: none; }
+    .pm-lang button:focus-visible { outline: 2px solid var(--pm-blue-light); outline-offset: -2px; border-radius: 999px; }
 
     .pm-speaker {
         border: 1px solid var(--pm-line);
@@ -364,6 +383,7 @@
         .pm-msg-avatar { width: 28px; height: 28px; }
         .pm-msg-avatar svg { width: 18px; height: 18px; }
         .pm-status, .pm-cards, .pm-summary { margin-left: 37px; }
+        .pm-chat-header { flex-wrap: wrap; row-gap: 8px; }
     }
 </style>
 
@@ -403,6 +423,10 @@
         </div>
         <button type="button" class="pm-speaker" id="pmSpeaker" title="Read replies aloud" aria-label="Read replies aloud">&#128264;</button>
         <button type="button" class="pm-restart" id="pmRestart" title="Clear the chat and begin as a new patient">New patient</button>
+        @if (!empty($webBookingUrl))
+            <a class="pm-weblink" id="pmWebLink" href="{{ $webBookingUrl }}" target="_blank" rel="noopener noreferrer"
+               title="Open the practice's online booking form in a new tab">Book on the website</a>
+        @endif
     </div>
 
     <div class="pm-stream" id="pmStream"></div>
@@ -433,6 +457,7 @@
     var hint = document.getElementById('pmHint');
     var status = document.getElementById('pmStatus');
     var restartBtn = document.getElementById('pmRestart');
+    var webLink = document.getElementById('pmWebLink');
     var speakerBtn = document.getElementById('pmSpeaker');
 
     var langBox = document.getElementById('pmLang');
@@ -466,6 +491,8 @@
             newConversation: 'Start a new conversation',
             restart: 'New patient',
             restartTitle: 'Clear the chat and begin as a new patient',
+            webBooking: 'Book on the website',
+            webBookingTitle: "Open the practice's online booking form in a new tab",
             edit: 'Edit this message',
             confirmed: 'Appointment confirmed',
             lostConnection: 'Sorry, I lost the connection for a moment. Could you say that again?',
@@ -498,6 +525,8 @@
             newConversation: 'Neues Gespräch beginnen',
             restart: 'Neuer Patient',
             restartTitle: 'Chat leeren und als neuer Patient beginnen',
+            webBooking: 'Auf der Website buchen',
+            webBookingTitle: 'Das Online-Buchungsformular der Praxis in einem neuen Tab öffnen',
             edit: 'Diese Nachricht bearbeiten',
             confirmed: 'Termin bestätigt',
             lostConnection: 'Entschuldigung, die Verbindung war kurz weg. Können Sie das noch einmal sagen?',
@@ -1820,6 +1849,11 @@
         speakerBtn.setAttribute('aria-label', tr('speakerLabel'));
         restartBtn.textContent = tr('restart');
         restartBtn.title = tr('restartTitle');
+
+        if (webLink) {
+            webLink.textContent = tr('webBooking');
+            webLink.title = tr('webBookingTitle');
+        }
         voiceOutput.repaint();
 
         Array.prototype.forEach.call(langBox.querySelectorAll('button'), function (button) {

@@ -127,6 +127,13 @@ return [
     // Change something) before the patient is created in PureMed. false = ROLLBACK: created straight
     // after the gender answer, as before. The 4-digit code is required either way.
     'confirm_details' => (bool) env('AI_ASSISTANT_CONFIRM_DETAILS', true),
+    // The header link "Book on the website", for a patient who would rather not book in the chat. It goes to
+    // the booking form of the practice whose domain the assistant was opened on (the same host and base
+    // path, plus /online-appointments), so every tenant gets its own. false = no link.
+    'web_booking_link' => (bool) env('AI_ASSISTANT_WEB_BOOKING_LINK', true),
+    // Only for a practice whose form is somewhere else: a full http(s) address that replaces the one
+    // above. Leave empty otherwise - one fixed address would be wrong for every other tenant.
+    'web_booking_url' => env('AI_ASSISTANT_WEB_BOOKING_URL'),
     // An answer that names one option exactly ("Dr Anna Patel", "the second one", "die zweite")
     // is read by the rules without asking an AI, when the rules provably pick the same option.
     // false = ROLLBACK: every free-text answer on those steps goes to the AI first, as before.

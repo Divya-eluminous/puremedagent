@@ -179,8 +179,25 @@ class ChatController extends Controller
 
     public function index()
     {
+        // The booking form of the practice this page was opened on: the same
+        // host and base path, so each tenant links to its own. A setting can
+        // replace it for a practice whose form lives elsewhere.
+        $webBookingUrl = trim((string) config('ai-assistant.web_booking_url'));
+
+        if ($webBookingUrl === '' && config('ai-assistant.web_booking_link', true)) {
+            $webBookingUrl = request()->getSchemeAndHttpHost() . request()->getBasePath() . '/online-appointments';
+        }
+
+        // Only a plain web address is ever linked: anything else (a javascript: or
+        // data: URL, a typo) is left out rather than put in front of a patient.
+
+        if (preg_match('#^https?://[^\s"\'<>]+$#i', $webBookingUrl) !== 1) {
+            $webBookingUrl = null;
+        }
+
         return view('ai-assistant.index', [
             'pageTitle' => 'PureMed AI Assistant',
+            'webBookingUrl' => $webBookingUrl,
         ]);
     }
 
