@@ -6269,7 +6269,7 @@ class ChatController extends Controller
         // the most natural thing to do - and without them the whole sentence
         // reached the word cap below and was turned away as not a name.
         $value = preg_replace(
-            "/^(?:my\s+(?:first\s+|last\s+|sur|full\s+|complete\s+|whole\s+)?name(?:'s|\s+is)?"
+            "/^(?:(?:my\s+)?(?:first\s+|last\s+|sur|full\s+|complete\s+|whole\s+)?name(?:'s|\s+is)?"
             . "|i\s*am|i'm|it'?s|this\s+is|call\s+me"
             . "|mein\s+(?:vor|nach|voll\w*\s+)?name\s+ist|ich\s+hei(?:ß|ss)e|ich\s+bin|das\s+ist)\s+/iu",
             '',
